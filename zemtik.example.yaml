@@ -5,10 +5,19 @@
 # (inline rules or a non-empty policy_dir) AND an audit sink.
 
 # strict | shadow | enforce  (strict is the secure default)
+#   strict / enforce — a deny is enforced: GovernanceDenied is raised, tool blocked.
+#   shadow           — a deny is recorded but NOT enforced; the tool still runs.
+#                      Use it to surface false-denies on live traffic before
+#                      switching to enforce. Shadow still requires an audit sink.
+# The kill-switch (operational, not config) reverts a running governor to its
+# prior governed fallback path — never to allow-all.
 mode: strict
 
-# Where the audit trail goes. "memory" uses the in-memory Merkle-chained log;
-# a file path selects the file sink (S5). Required in strict mode.
+# Where the audit trail goes.
+#   "memory"  — the in-memory Merkle-chained log (default).
+#   <path>    — a durable, HMAC-signed FileAuditSink at that path. The signing
+#               key is read from $ZEMTIK_AUDIT_SECRET (NOT this file); a file sink
+#               without it refuses to start. Required in every mode.
 audit_sink: memory
 
 # Inline policy rules. AGT fails OPEN on no match; the wrapper imposes

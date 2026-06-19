@@ -30,6 +30,33 @@ from .protocols import (
 # blocked outcome, we just have no resolved DID to attribute it to.
 _UNIDENTIFIED_DID = "did:mesh:unidentified"
 
+# Shadow mode observes without enforcing; every other mode enforces (raises on a
+# deny). Kept as a set so a typo in a mode string enforces by default — the safe
+# direction. Config validates the mode string at startup (GovernanceNotConfigured).
+_SHADOW = "shadow"
+
+
+class Killswitch:
+    """An operator-flippable revert flag.
+
+    When engaged, :class:`ZemtikGovern` routes evaluation back to the prior
+    governed fallback path instead of the wrapper's own policy — never to
+    allow-all. Callable so the core only depends on ``() -> bool``; a real
+    deployment may swap in any callable reading a per-env flag.
+    """
+
+    def __init__(self, engaged: bool = False) -> None:
+        self.engaged = engaged
+
+    def engage(self) -> None:
+        self.engaged = True
+
+    def disengage(self) -> None:
+        self.engaged = False
+
+    def __call__(self) -> bool:
+        return self.engaged
+
 
 class ZemtikGovern:
     """Wires the three seams and runs them in the sanctioned order."""
@@ -39,10 +66,17 @@ class ZemtikGovern:
         identity: IdentityProvider,
         policy: PolicyEngine,
         audit: AuditSink,
+        *,
+        mode: str = "enforce",
+        fallback: PolicyEngine | None = None,
+        killswitch: Callable[[], bool] | None = None,
     ) -> None:
         self._identity = identity
         self._policy = policy
         self._audit = audit
+        self._mode = mode
+        self._fallback = fallback
+        self._killswitch = killswitch
 
     async def govern(self, ctx: GovernanceContext) -> Decision:
         # Identity AND policy run inside the fail-closed boundary: a fault in
@@ -53,7 +87,7 @@ class ZemtikGovern:
         did = _UNIDENTIFIED_DID
         try:
             did = await self._identity.identify(ctx.subject)
-            decision = await self._policy.evaluate(ctx)
+            decision = await self._select_engine().evaluate(ctx)
         except Exception as exc:
             # Fail-closed: the tool never runs; the original exception is preserved.
             denial = Decision(
@@ -64,15 +98,35 @@ class ZemtikGovern:
                 denial_kind="system",
             )
             await self._audit.write(
-                AuditEntry.from_decision(ctx, did, denial, outcome="error")
+                AuditEntry.from_decision(
+                    ctx, did, denial, outcome="error", mode=self._mode
+                )
             )
             raise GovernanceError("governance engine failed; tool blocked") from exc
 
-        event_id = await self._audit.write(AuditEntry.from_decision(ctx, did, decision))
+        event_id = await self._audit.write(
+            AuditEntry.from_decision(ctx, did, decision, mode=self._mode)
+        )
         decision = replace(decision, audit_event_id=event_id)
-        if not decision.allowed:
+        # Shadow mode observes only: the denial is recorded above but NOT enforced,
+        # so the caller's tool still runs. Every other mode enforces the deny.
+        if not decision.allowed and self._mode != _SHADOW:
             raise GovernanceDenied(decision)
         return decision
+
+    def _select_engine(self) -> PolicyEngine:
+        """The policy engine for this call. Normally the wrapper's own policy; with
+        the kill-switch engaged, the prior governed fallback path instead — never
+        allow-all. Engaging the switch with no fallback wired is a fail-closed
+        error (caught by ``govern`` and audited as a system denial), not a bypass.
+        """
+        if self._killswitch is not None and self._killswitch():
+            if self._fallback is None:
+                raise GovernanceError(
+                    "kill-switch engaged with no governed fallback; refusing to allow-all"
+                )
+            return self._fallback
+        return self._policy
 
     # NOTE: the decision→audit-vocabulary mapping that used to live here as
     # _entry() now lives on AuditEntry.from_decision — audit language stays in the

@@ -3,15 +3,6 @@
 Tracked follow-ups, grouped by component then priority (P0 highest → P4),
 Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
 
-## Audit (S5)
-
-- **Durable file audit sink**
-  **Priority:** P1
-  `registry._build_audit` only wires the in-memory Merkle log (`audit_sink:
-  "memory"`); any other value is rejected as unsupported. In-memory means the
-  trail is lost on restart, so `strict` mode is not yet production-durable. Wire
-  the agentmesh `FileAuditSink` and accept a file-path `audit_sink`. Tracked by #5.
-
 ## Policy / Decision (S4)
 
 - **Populate Decision enrichment fields**
@@ -45,3 +36,12 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
 - **S3: Policy core** — orchestration order, deny-by-default, fail-closed (incl.
   identity faults), enriched Decision, registry, `_GovernedProxy`.
   **Completed:** Unreleased (2026-06-18)
+- **S4: Kill-switch + shadow/enforce modes** — `mode` on `ZemtikGovern`
+  (shadow observes without enforcing; enforce/strict raise), mode stamped on the
+  audit entry, `Killswitch` reverting to a governed fallback (never allow-all),
+  mode threaded config → registry → core. **Completed:** Unreleased (2026-06-18)
+- **S5: Audit + redacted emergency fallback** — `audit/` package; Merkle adapter
+  thaws the frozen payload before hashing; redacted metadata-only fallback
+  (0600 file + stderr, `payload_sha256`, never raw payload) failing closed as
+  `GovernanceError`; durable HMAC-signed `FileAuditSink` wired from a file-path
+  `audit_sink` + `$ZEMTIK_AUDIT_SECRET`. **Completed:** Unreleased (2026-06-18)

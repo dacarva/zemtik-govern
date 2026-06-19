@@ -13,8 +13,9 @@ it — StaticIdentity today, Ed25519 later, with no base class to inherit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from typing import Any, Protocol, runtime_checkable
 
 from .context import GovernanceContext
 
@@ -54,6 +55,13 @@ class AuditEntry:
     action: str
     outcome: str
     policy_decision: str | None = None
+    mode: str | None = None
+    # Carried from the governed context so the audit sink can record the request
+    # data (the adapter thaws it first) and the fallback can hash it. Frozen on
+    # the context; never mutated here.
+    payload: Mapping[str, Any] = field(default_factory=dict)
+    idempotency_key: str | None = None
+    ts: str | None = None
 
     @classmethod
     def from_decision(
@@ -62,6 +70,7 @@ class AuditEntry:
         agent_did: str,
         decision: Decision,
         outcome: str | None = None,
+        mode: str | None = None,
     ) -> AuditEntry:
         if outcome is None:
             outcome = "success" if decision.allowed else "denied"
@@ -71,6 +80,10 @@ class AuditEntry:
             action=ctx.action,
             outcome=outcome,
             policy_decision=decision.reason,
+            mode=mode,
+            payload=ctx.payload,
+            idempotency_key=ctx.idempotency_key,
+            ts=ctx.ts,
         )
 
 
