@@ -14,7 +14,7 @@ from ._agt import AGTBoundary, AGTVersionError
 from .audit import AgentMeshAudit
 from .config import GovernanceConfig
 from .context import GovernanceContext
-from .core import ZemtikGovern
+from .core import Killswitch, ZemtikGovern
 from .errors import GovernanceDenied, GovernanceError, GovernanceNotConfigured
 from .identity import StaticIdentity
 from .policy import AgentOsPolicy
@@ -43,6 +43,7 @@ __all__ = [
     "GovernanceNotConfigured",
     "GovernanceRegistry",
     "IdentityProvider",
+    "Killswitch",
     "PolicyEngine",
     "StaticIdentity",
     "ZemtikGovern",

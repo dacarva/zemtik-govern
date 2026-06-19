@@ -85,12 +85,14 @@ class AGTBoundary:
         # (and so pin assertion runs before any AGT code is touched).
         from agent_os.policies import PolicyDocument as _PolicyDocument
         from agent_os.policies import PolicyEvaluator as _PolicyEvaluator
+        from agentmesh.governance import FileAuditSink as _FileAuditSink
         from agentmesh.governance.audit import AuditLog as _AuditLog
         from agentmesh.identity import AgentDID as _AgentDID
 
         self._PolicyEvaluator = _PolicyEvaluator
         self._PolicyDocument = _PolicyDocument
         self._AuditLog = _AuditLog
+        self._FileAuditSink = _FileAuditSink
         self._AgentDID = _AgentDID
 
     # --- policy concern (agent_os) ---
@@ -112,6 +114,14 @@ class AGTBoundary:
     def audit_log(self, sink=None):
         """A tamper-evident AGT audit log (Merkle-chained)."""
         return self._AuditLog(sink=sink)
+
+    def file_audit_sink(self, path, secret_key: bytes):
+        """A durable, HMAC-signed, hash-chained file sink (agentmesh primitive).
+
+        The ``secret_key`` is required: a file audit trail without a signing key is
+        not tamper-evident. The caller (registry) sources it and fails closed if
+        absent."""
+        return self._FileAuditSink(path, secret_key)
 
     # --- identity concern (agentmesh) ---
     def mint_did(self, unique_id: str) -> str:

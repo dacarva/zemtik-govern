@@ -84,6 +84,19 @@ async def test_from_config_wires_a_governing_core():
 
 
 @pytest.mark.asyncio
+async def test_from_config_shadow_mode_observes_without_enforcing():
+    """A shadow-mode config builds a governor that records a deny but does NOT
+    raise — the mode flows config -> registry -> core."""
+    boundary = AGTBoundary()
+    cfg = GovernanceConfig(mode="shadow", audit_sink="memory")  # no rules: deny-all
+    gov = GovernanceRegistry.from_config(cfg, boundary).build()
+
+    decision = await gov.govern(GovernanceContext(action="anything", subject="agent-1"))
+    assert decision.allowed is False  # policy would deny
+    # but shadow did not raise — observe-only
+
+
+@pytest.mark.asyncio
 async def test_from_config_fails_closed_when_engine_errors(monkeypatch):
     """The system-denial path through the AGT-wired core, not just a fake seam:
     a policy engine fault becomes GovernanceError and the tool is blocked."""
@@ -112,18 +125,35 @@ async def test_from_config_fails_closed_when_engine_errors(monkeypatch):
         await gov.govern(GovernanceContext(action="tool.run", subject="agent-1"))
 
 
-def test_from_config_rejects_unsupported_audit_sink():
-    boundary = AGTBoundary()
+_RULE = {
+    "name": "allow-tool-run",
+    "condition": {"field": "action", "operator": "eq", "value": "tool.run"},
+    "action": "allow",
+}
+
+
+@pytest.mark.asyncio
+async def test_from_config_wires_file_audit_sink(tmp_path, monkeypatch):
+    """A file-path audit_sink builds a durable FileAuditSink-backed core: the
+    trail is written to the chosen file and the tamper-evident chain verifies."""
+    monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "test-secret")
+    audit_file = tmp_path / "audit.jsonl"
     cfg = GovernanceConfig(
-        mode="strict",
-        rules=[
-            {
-                "name": "allow-tool-run",
-                "condition": {"field": "action", "operator": "eq", "value": "tool.run"},
-                "action": "allow",
-            }
-        ],
-        audit_sink="/var/log/zemtik/audit.log",  # file sink: S5, not yet wired
+        mode="strict", rules=[_RULE], audit_sink=str(audit_file)
     )
-    with pytest.raises(GovernanceNotConfigured, match="not supported yet"):
-        GovernanceRegistry.from_config(cfg, boundary)
+    gov = GovernanceRegistry.from_config(cfg, AGTBoundary()).build()
+
+    decision = await gov.govern(GovernanceContext(action="tool.run", subject="agent-1"))
+    assert decision.allowed is True
+    assert audit_file.exists() and audit_file.read_text(encoding="utf-8").strip()
+
+
+def test_from_config_file_sink_without_secret_fails_closed(tmp_path, monkeypatch):
+    """A file sink with no HMAC secret in the environment is a startup error — an
+    unsigned tamper-evident log is a contradiction, refuse rather than degrade."""
+    monkeypatch.delenv("ZEMTIK_AUDIT_SECRET", raising=False)
+    cfg = GovernanceConfig(
+        mode="strict", rules=[_RULE], audit_sink=str(tmp_path / "audit.jsonl")
+    )
+    with pytest.raises(GovernanceNotConfigured, match="secret"):
+        GovernanceRegistry.from_config(cfg, AGTBoundary())

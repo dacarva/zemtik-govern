@@ -27,6 +27,14 @@ class GovernanceRegistry:
         self._identity: IdentityProvider | None = None
         self._policy: PolicyEngine | None = None
         self._audit: AuditSink | None = None
+        self._mode: str = "enforce"
+
+    def register_mode(self, mode: str) -> GovernanceRegistry:
+        """The operational mode (``shadow``/``enforce``/``strict``) the built core
+        runs in. Validated at config time; recorded here so ``build()`` carries it
+        into the core rather than defaulting silently."""
+        self._mode = mode
+        return self
 
     def register_identity(self, impl: IdentityProvider) -> GovernanceRegistry:
         self._identity = impl
@@ -58,6 +66,7 @@ class GovernanceRegistry:
             identity=self._identity,  # type: ignore[arg-type]
             policy=self._policy,  # type: ignore[arg-type]
             audit=self._audit,  # type: ignore[arg-type]
+            mode=self._mode,
         )
 
     @classmethod
@@ -81,6 +90,7 @@ class GovernanceRegistry:
         rules = list(config.rules) or None
         return (
             cls()
+            .register_mode(config.mode)
             .register_identity(StaticIdentity(boundary))
             .register_policy(
                 AgentOsPolicy(boundary, rules=rules, root_dir=config.policy_dir)
@@ -88,20 +98,33 @@ class GovernanceRegistry:
             .register_audit(audit)
         )
 
+    # The HMAC signing key for a file audit sink is read from the environment,
+    # never the config file — a signing secret does not belong in checked-in YAML.
+    _AUDIT_SECRET_ENV = "ZEMTIK_AUDIT_SECRET"
+
     @staticmethod
     def _build_audit(config: GovernanceConfig, boundary: AGTBoundary) -> AuditSink:
         """Honour the validated ``audit_sink`` instead of silently defaulting.
 
-        ``"memory"`` (or unset) selects the in-memory Merkle log. Anything else
-        is a file/external sink, which lands in S5 — fail loud now rather than
-        discard the configured destination and write the trail somewhere the
-        operator did not choose.
+        ``"memory"`` (or unset) selects the in-memory Merkle log. Any other value
+        is treated as a file path and backed by a durable, HMAC-signed
+        :class:`FileAuditSink`. The signing key comes from
+        ``$ZEMTIK_AUDIT_SECRET``; a file sink without it is a startup error — an
+        unsigned tamper-evident log is a contradiction, not a degraded mode.
         """
+        import os
+
         from .audit import AgentMeshAudit
 
         sink = config.audit_sink
         if sink in (None, "memory"):
             return AgentMeshAudit(boundary)
-        raise GovernanceNotConfigured(
-            f"audit_sink {sink!r} not supported yet; only 'memory' is wired in v0.1 (file sink: S5)"
-        )
+
+        secret = os.environ.get(GovernanceRegistry._AUDIT_SECRET_ENV)
+        if not secret:
+            raise GovernanceNotConfigured(
+                f"file audit_sink {sink!r} requires an HMAC secret in "
+                f"${GovernanceRegistry._AUDIT_SECRET_ENV}; refusing an unsigned trail"
+            )
+        file_sink = boundary.file_audit_sink(sink, secret.encode("utf-8"))
+        return AgentMeshAudit(boundary, sink=file_sink)

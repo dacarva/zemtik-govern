@@ -6,11 +6,32 @@ via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 
 ## [Unreleased]
 
-S1–S3 of the governance wrapper: the AGT boundary, the M0 skeleton, and the
+S1–S5 of the governance wrapper: the AGT boundary, the M0 skeleton, and the
 fail-closed policy core, plus config/registry/proxy wiring and a hardened CI
-supply-chain gate.
+supply-chain gate — now with operational safety modes (S4) and the durable,
+fallback-protected audit trail (S5).
 
 ### Added
+
+- **Operational modes + kill-switch** (S4, `core.py`) — `ZemtikGovern` takes a
+  `mode`: `shadow` records a would-be denial but does NOT enforce it (the tool
+  still runs, surfacing false-denies on live traffic), while `enforce`/`strict`
+  raise `GovernanceDenied`. The mode is stamped on every `AuditEntry` so the
+  distinction is observable. `Killswitch` reverts a running governor to its prior
+  governed fallback path — never to allow-all; engaging it with no fallback wired
+  fails closed. Mode flows config → `registry.register_mode` → core.
+- **Audit package** (S5, `audit/`) — `audit.py` becomes a package. `log.py` is the
+  Merkle-chained adapter (now thaws the frozen `MappingProxyType` payload to a
+  plain dict before agentmesh's json-based hashing) re-exposing
+  `verify_integrity`/`get_proof`. `fallback.py` is the emergency channel: if the
+  primary sink raises, a redacted, metadata-only record (`payload_sha256`, never
+  the raw payload) is written to a fixed-path file (mode `0600`) and stderr, then
+  the write fails closed as `GovernanceError` — the denial invariant holds even
+  when audit cannot.
+- **Durable file audit sink** (S5, `_agt.py`, `registry.py`) — a file-path
+  `audit_sink` now wires agentmesh's HMAC-signed `FileAuditSink`; the signing key
+  is read from `$ZEMTIK_AUDIT_SECRET` (never the config file) and a file sink
+  without it refuses to start.
 
 - **AGT boundary** (`_agt.py`) — the single sanctioned import of `agent_os` /
   `agentmesh`, asserting pinned distribution versions at construction via
