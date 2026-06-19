@@ -307,7 +307,9 @@ async def s10_durable_audit_and_merkle() -> None:
     import tempfile
 
     secret = os.environ.get("ZEMTIK_AUDIT_SECRET", "qa-test-secret")
-    audit_path = pathlib.Path(tempfile.mktemp(suffix=".jsonl"))
+    fd, _tmp = tempfile.mkstemp(suffix=".jsonl")
+    os.close(fd)
+    audit_path = pathlib.Path(_tmp)
 
     boundary = _boundary()
     file_sink = boundary.file_audit_sink(str(audit_path), secret.encode())

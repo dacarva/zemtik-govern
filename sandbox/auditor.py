@@ -26,7 +26,7 @@ from zemtik_govern._agt import AGTBoundary
 from zemtik_govern.audit import AgentMeshAudit
 from zemtik_govern.context import GovernanceContext
 from zemtik_govern.core import ZemtikGovern
-from zemtik_govern.errors import GovernanceDenied, GovernanceError
+from zemtik_govern.errors import GovernanceDenied
 from zemtik_govern.identity import StaticIdentity
 from zemtik_govern.policy import AgentOsPolicy
 
@@ -245,11 +245,14 @@ def demonstrate_tamper_detection(
     fresh_audit = AgentMeshAudit(boundary, sink=fresh_sink)
     ok, err = fresh_audit.verify_integrity()
     if not ok:
-        print(f"  ✅ Tampering DETECTED — chain verification failed")
+        print("  ✅ Tampering DETECTED — chain verification failed")
         if err:
             print(f"     reason: {err}")
     else:
-        print("  ⚠️  Chain check passed on tampered file (agentmesh verifies signatures, not chain links, on re-read)")
+        print(
+            "  ⚠️  Chain check passed on tampered file"
+            " (agentmesh verifies signatures, not chain links, on re-read)"
+        )
 
     # Restore
     audit_path.write_text(original, encoding="utf-8")
@@ -282,7 +285,9 @@ async def main() -> None:
     secret_str = os.environ.get("ZEMTIK_AUDIT_SECRET", "audit-secret")
     secret = secret_str.encode()
 
-    audit_path = pathlib.Path(tempfile.mktemp(suffix="-zemtik-audit.jsonl"))
+    fd, _tmp = tempfile.mkstemp(suffix="-zemtik-audit.jsonl")
+    os.close(fd)
+    audit_path = pathlib.Path(_tmp)
     print(f"\n  Audit trail will be written to: {audit_path}")
 
     boundary = AGTBoundary()
