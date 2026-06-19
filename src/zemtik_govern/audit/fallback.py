@@ -59,7 +59,11 @@ def redacted_record(entry: AuditEntry, err: BaseException) -> dict[str, Any]:
         "decision": entry.outcome,
         "idempotency_key": entry.idempotency_key,
         "ts": entry.ts,
-        "err": f"{type(err).__name__}: {err}",
+        # Exception TYPE only, never str(err): a sink that embeds the failing
+        # entry in its message (common) would otherwise smuggle the raw payload
+        # into this "redacted" record, defeating the whole channel. The digest
+        # below is the correlation handle; the type names the failure mode.
+        "err": type(err).__name__,
         "payload_sha256": _payload_sha256(entry.payload),
     }
     # Defensive: only the allow-listed fields, never anything else.
@@ -81,8 +85,12 @@ def emit_fallback(
     target = Path(path) if path is not None else DEFAULT_FALLBACK_PATH
     try:
         # Open owner-only (0600). os.open honours the mode on creation; chmod the
-        # existing file too, so a pre-existing looser file is tightened.
-        fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        # existing file too, so a pre-existing looser file is tightened. O_NOFOLLOW
+        # refuses to follow a symlink at the final path component: a local attacker
+        # who pre-plants the path as a symlink can otherwise redirect our chmod 0600
+        # (and append) onto an arbitrary file. Not all platforms define it; default 0.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(str(target), flags, 0o600)
         try:
             os.chmod(target, 0o600)
             os.write(fd, (line + "\n").encode("utf-8"))

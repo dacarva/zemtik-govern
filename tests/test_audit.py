@@ -112,3 +112,47 @@ def test_fallback_file_is_owner_only(tmp_path):
     emit_fallback(entry, OSError("boom"), path=fb)
     mode = stat.S_IMODE(fb.stat().st_mode)
     assert mode == 0o600
+
+
+def test_fallback_err_field_never_carries_payload(tmp_path):
+    """Regression: the fallback `err` field is the exception TYPE only, never
+    str(exc). A sink that embeds the failing entry/payload in its exception
+    message must not smuggle that payload into the "redacted" record.
+    Found by /review on 2026-06-18.
+    """
+    from zemtik_govern.audit import emit_fallback
+
+    fb = tmp_path / "fb.jsonl"
+    entry = AuditEntry.from_decision(_frozen_ctx(), "did:mesh:x", _ALLOW)
+    # An exception whose message leaks the raw payload (sinks do this).
+    leaky = OSError("write failed for entry payload={'amount': 5, 'meta': 'USD'}")
+    emit_fallback(entry, leaky, path=fb)
+
+    body = fb.read_text(encoding="utf-8")
+    assert "USD" not in body  # the leaked payload value must be absent
+    assert '"amount"' not in body
+    assert '"err": "OSError"' in body  # type name only, no message
+
+
+def test_fallback_refuses_to_follow_symlink(tmp_path):
+    """Regression: with O_NOFOLLOW, a pre-planted symlink at the fallback path is
+    not followed — the attacker's target file is neither chmod'd nor appended to.
+    The file channel is skipped (OSError swallowed); stderr still carried it.
+    Found by /review on 2026-06-18.
+    """
+    import os
+
+    from zemtik_govern.audit import emit_fallback
+
+    victim = tmp_path / "victim"
+    victim.write_text("secret\n", encoding="utf-8")
+    os.chmod(victim, 0o644)
+    link = tmp_path / "fb.jsonl"
+    os.symlink(victim, link)
+
+    entry = AuditEntry.from_decision(_frozen_ctx(), "did:mesh:x", _ALLOW)
+    emit_fallback(entry, OSError("boom"), path=link)
+
+    # victim untouched: not chmod'd to 0600, not appended to.
+    assert stat.S_IMODE(victim.stat().st_mode) == 0o644
+    assert victim.read_text(encoding="utf-8") == "secret\n"

@@ -27,7 +27,10 @@ fallback-protected audit trail (S5).
   primary sink raises, a redacted, metadata-only record (`payload_sha256`, never
   the raw payload) is written to a fixed-path file (mode `0600`) and stderr, then
   the write fails closed as `GovernanceError` — the denial invariant holds even
-  when audit cannot.
+  when audit cannot. The fallback record's `err` field is the exception TYPE
+  only (never `str(exc)`), so a sink that embeds the failing payload in its
+  message can't smuggle it into the redacted trail; the file open uses
+  `O_NOFOLLOW` so a pre-planted symlink can't redirect the `0600` chmod/append.
 - **Durable file audit sink** (S5, `_agt.py`, `registry.py`) — a file-path
   `audit_sink` now wires agentmesh's HMAC-signed `FileAuditSink`; the signing key
   is read from `$ZEMTIK_AUDIT_SECRET` (never the config file) and a file sink
@@ -66,8 +69,9 @@ fallback-protected audit trail (S5).
   dev lockfile (`requirements-dev.lock`, covering pytest/ruff), ruff as a hard
   lint gate, AGT conformance + e2e tests, and a version-pinned `pip-audit` OSV
   gate against `requirements.lock`.
-- **Tests** — 59 passing across boundary, conformance, context, errors,
-  protocols, policy, core, e2e, config, registry, and proxy.
+- **Tests** — 75 passing across boundary, conformance, context, errors,
+  protocols, policy, core, e2e, config, registry, proxy, modes, and audit
+  (incl. fallback redaction + symlink-refusal regressions).
 
 ### Notes / deferred
 
