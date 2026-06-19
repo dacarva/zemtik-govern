@@ -341,6 +341,38 @@ class AuditRecord:
 
 ---
 
+## CLI
+
+### `zemtik init langchain`
+
+Scaffold a `govern.yaml` from LangChain tool introspection.
+
+```bash
+# Minimal govern.yaml — no tools introspected:
+python -m zemtik_govern.cli init langchain
+
+# Introspect tools from a module and write to stdout:
+python -m zemtik_govern.cli init langchain --tools-module my_agent.tools
+
+# Write directly to a file:
+python -m zemtik_govern.cli init langchain --tools-module my_agent.tools --output govern.yaml
+```
+
+**Flags**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--tools-module MODULE` | `None` | Dotted Python module path to import for tool introspection. |
+| `--output FILE` | stdout | Write YAML to `FILE` instead of stdout. |
+
+**stdout / stderr discipline:** YAML goes to stdout only (supports shell redirection). Warnings and errors go to stderr. An import failure prints an error to stderr and exits with code 1 without writing any YAML to stdout.
+
+**Security note:** `--tools-module` accepts arbitrary Python import paths. This is a developer-only command — never expose it to untrusted input in production.
+
+The generated file uses `mode: strict`, `audit_sink: memory`, and commented-out rules (one per discovered tool). Uncomment and adjust rules before deploying.
+
+---
+
 ## AGT Boundary
 
 ### `AGTBoundary(pins: dict[str, str] = AGT_PINS)`
