@@ -1,5 +1,24 @@
 **IMPORTANT: Always use the caveman skill if present**
 
+## Python Environment
+
+**ALWAYS use the project venv.** Never run `python`, `pip`, or `uv pip` without activating it first.
+
+```bash
+# Activate (required before any Python command)
+source .venv/bin/activate
+
+# Install deps
+uv pip install -e ".[dev]"
+
+# Run tests
+pytest
+```
+
+If `.venv` is missing: `uv venv .venv --python 3.11 && source .venv/bin/activate`
+
+All `python`, `pytest`, `uv pip` commands in this project assume the venv is active.
+
 ## gstack Sprint Harness + Vertical-Slice Issues
 
 **Mandatory workflow**: gstack planning → /to-issues → implementation → gstack QA.

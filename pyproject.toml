@@ -1,0 +1,30 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zemtik-govern"
+version = "0.1.0.dev0"
+description = "Security-first modular Python wrapper around Microsoft AGT"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "David Carvajal", email = "david@zemtik.com" }]
+dependencies = [
+    # AGT boundary — pinned exactly; assert_pins() enforces these at runtime.
+    "agent-os-kernel==3.7.0",
+    "agentmesh-platform==3.7.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zemtik_govern"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
