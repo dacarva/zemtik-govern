@@ -5,9 +5,15 @@ Everything here is behavior visible through the public boundary surface, not
 the internals of how agent_os / agentmesh are wired.
 """
 
+import ast
+from pathlib import Path
+
 import pytest
 
 from zemtik_govern._agt import AGT_PINS, AGTBoundary, AGTVersionError
+
+_SRC = Path(__file__).parent.parent / "src" / "zemtik_govern"
+_AGT_FORBIDDEN = {"agent_os", "agentmesh"}
 
 
 def test_boundary_constructs_when_pins_match():
@@ -57,3 +63,42 @@ def test_boundary_mints_did_string():
     boundary = AGTBoundary()
     did = boundary.mint_did("agent-1")
     assert did == "did:mesh:agent-1"
+
+
+def _agt_imports_in_dir(package_dir: Path) -> list[tuple[Path, str]]:
+    """Return (file, module) for any forbidden AGT import found via AST scan."""
+    violations = []
+    for py_file in package_dir.rglob("*.py"):
+        if py_file.name == "_agt.py":
+            continue
+        tree = ast.parse(py_file.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = alias.name.split(".")[0]
+                    if root in _AGT_FORBIDDEN:
+                        violations.append((py_file, alias.name))
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    root = node.module.split(".")[0]
+                    if root in _AGT_FORBIDDEN:
+                        violations.append((py_file, node.module))
+    return violations
+
+
+def test_langchain_package_has_no_direct_agt_imports():
+    """AGT boundary rule: langchain/ must never import agent_os or agentmesh directly."""
+    d = _SRC / "langchain"
+    if not d.exists():
+        pytest.skip("langchain package not yet implemented")
+    violations = _agt_imports_in_dir(d)
+    assert not violations, f"Direct AGT imports found in langchain/: {violations}"
+
+
+def test_mcp_package_has_no_direct_agt_imports():
+    """AGT boundary rule: mcp/ must never import agent_os or agentmesh directly."""
+    d = _SRC / "mcp"
+    if not d.exists():
+        pytest.skip("mcp package not yet implemented")
+    violations = _agt_imports_in_dir(d)
+    assert not violations, f"Direct AGT imports found in mcp/: {violations}"

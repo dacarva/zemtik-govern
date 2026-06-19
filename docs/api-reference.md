@@ -371,6 +371,7 @@ python -m zemtik_govern.cli init langchain --tools-module my_agent.tools --outpu
 
 The generated file uses `mode: strict`, `audit_sink: memory`, and commented-out rules (one per discovered tool). Uncomment and adjust rules before deploying.
 
+
 ---
 
 ## AGT Boundary
