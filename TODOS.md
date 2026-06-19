@@ -128,11 +128,65 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
 
 ## CI / supply chain
 
+- **Supply-chain CI — hash-pinned lockfile + pip-audit gate** (issue #24)
+  **Priority:** P1
+  Generate hash-pinned lockfile (`pip-compile --generate-hashes`), add
+  `pip-audit` CI step that fails on known CVEs, gate merges on a clean report.
+  A governance wrapper must be supply-chain clean — a compromised dep could
+  subvert the identity→policy→audit pipeline silently. Deferred from sprint
+  plan E7.
+
+- **Adversarial test matrix — E9** (issue #25)
+  **Priority:** P1
+  Tests for TOCTOU on `GovernanceContext` immutability under concurrent access,
+  policy bypass attempts (injected subject, malformed action, payload mutation),
+  audit chain integrity after crash/recovery, and idempotency key collision
+  attacks. Deferred from sprint plan E9.
+
 - **Pin GitHub Actions to commit SHAs**
   **Priority:** P2
   `actions/checkout@v4` and `astral-sh/setup-uv@v5` use mutable tags. For a
   project whose pitch is supply-chain integrity, pin third-party actions to full
   commit SHAs. Surfaced by the Codex adversarial review.
+
+## LangChain Integration (S9 — DX sprint)
+
+- **Compatibility matrix: govern_tool() across Python and LangChain versions**
+  **Priority:** P2
+  Run govern_tool() tests across Python 3.11/3.12, langchain-core 1.0–1.4 minor
+  versions, sync @tool, async @tool, StructuredTool, BaseTool subclass, and
+  plain Callable. Low urgency for v0.1 (happy path tested on current versions);
+  important before marketing as a drop-in wrapper. Currently tested only on
+  Python 3.11 and langchain-core 1.4.x. Surfaced by Codex eng review.
+
+- **Document on_denied="tool_message" safety model**
+  **Priority:** P3
+  When govern_tool() returns a ToolMessage("tool call denied"), the LangGraph
+  agent can continue, retry with different args, or route to another tool — it
+  is NOT blocked at the application level. Document the intended safety model in
+  docs/integrations/langchain.md: on_denied="tool_message" is safe when the
+  graph has a human-in-the-loop, a retry counter, or a downstream hard limit.
+  Operators who need enforcement must use on_denied="raise". The audit trail
+  records every denial regardless. Surfaced by Codex eng review (finding #8).
+
+- **Shadow-mode testing pattern in langchain integration guide**
+  **Priority:** P3
+  Document mode:shadow as the recommended test pattern for langchain integration
+  tests: use a test govern.yaml with mode:shadow to observe what would be denied
+  without enforcement. Without this, developers either skip governance in tests
+  (unsafe: the tool actually runs ungoverned) or use mode:strict (which fails
+  tests on valid denials and makes CI fragile). Add a "Testing" section to
+  docs/integrations/langchain.md. Surfaced by DX review.
+
+- **Measure TTHW with real developer onboarding sessions after PyPI launch**
+  **Priority:** P2
+  After zemtik-govern v0.1 is published to PyPI, run 3 developer onboarding
+  sessions (video or async) with LangChain developers who haven't seen the
+  project before. Measure actual TTHW against the <2-minute champion-tier
+  target. Record where each developer pauses, questions, or makes a mistake.
+  Use findings to iterate on README and examples before 1.0. Competitive
+  baseline: NeMo Guardrails ~8 min, Guardrails.ai ~5 min. Surfaced by DX
+  review (Pass 8). Triggered by: PyPI publication complete.
 
 ## Testing / tooling
 

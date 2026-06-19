@@ -4,6 +4,29 @@ All notable changes to zemtik-govern are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project versions
 via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 
+## [0.0.1.0] - 2026-06-19
+
+### Added
+- **LangChain and MCP integration scaffolding** — `zemtik_govern.langchain`,
+  `zemtik_govern.mcp`, and `zemtik_govern.cli` package directories with
+  optional dependency groups (`pip install zemtik-govern[langchain]` and
+  `[mcp]`). Implementation stubs are in place for the upcoming
+  `govern_tool()` API (issue #15) and `GovernedMCPServer` (issue #20).
+- **`tests/mcp/`** — test directory scaffolding mirroring `tests/langchain/`.
+
+### Fixed
+- **`AuditReader.proof()` hash-stripping bypass** — `_hash()` now returns
+  `None` (not `""`) when both `entry_hash` and `content_hash` are absent,
+  preventing a tampered trail with empty hash fields from passing chain
+  verification via the `"" == ""` shortcut.
+- **`AuditReader.proof()` split HMAC trust** — `verified` in the proof result
+  now requires both chain-link integrity AND HMAC verification, matching the
+  stronger guarantee of `verify()`. Previously a trail with a wrong HMAC secret
+  could return `proof()['verified'] = True`.
+- **`AuditReader.proof()` `merkle_proof` None tuples** — hash slots in the
+  returned proof list now fall back to `""` when a hash field is absent,
+  preventing `AttributeError` for callers iterating the proof.
+
 ## [Unreleased]
 
 ### Documentation sprint (2026-06-19)
