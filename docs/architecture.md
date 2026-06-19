@@ -17,6 +17,11 @@ Caller
   ▼
 ZemtikGovern.govern(ctx)
   │
+  │  [idempotency fast-path: if ctx.idempotency_key is set and key was seen]
+  │  ├─► replay: audit outcome="replay", return cached Decision (replayed=True)
+  │  └─► conflict: audit outcome="error", raise GovernanceError
+  │      (full evaluation path below is only taken on a fresh or un-keyed call)
+  │
   ├─► [1] IdentityProvider.identify(subject) ──► AgentRef (DID)
   │         StaticIdentity → AGTBoundary.mint_did()
   │
@@ -28,6 +33,12 @@ ZemtikGovern.govern(ctx)
             AgentMeshAudit → AGTBoundary.audit_log()
                  └─ on failure: emit_fallback() then GovernanceError
 ```
+
+> **Diagram note**: the idempotency branch above is a simplification of the full
+> `_idem_ledger` path in `core.py`.  The proxy (`_GovernedProxy`) adds a second
+> layer — effect-level idempotency — that is not shown here; see the
+> [Idempotency](#idempotency) section and the `_GovernedProxy` class docstring
+> for the complete picture.
 
 ### Why the order is fixed
 

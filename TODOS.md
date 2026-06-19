@@ -11,6 +11,9 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   documented but never set by any producer. Thread `correlation_id` from the
   context and `policy_id`/`policy_version` from the matched policy document, or
   drop the fields until wired. Surfaced by review (maintainability + red-team).
+  **Documented (2026-06-19)**: field comments in `protocols.py` now explicitly
+  state "reserved; always ``None`` in v0.1" so integrators do not write code
+  expecting live data.
 
 ## Idempotency / core (S7 hardening)
 
@@ -40,6 +43,9 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   deny regardless of the coroutine's eventual return. Also: the budget wraps each
   await separately (identity, then policy) and excludes lock-wait + audit, so
   total wall-clock can exceed `timeout`. Surfaced by adversarial review.
+  **Documented (2026-06-19)**: `_with_budget` docstring in `core.py` now
+  explains the cancellation-safety assumption and the known limitation. The code
+  issue (an engine swallowing `CancelledError`) is not yet fixed.
 
 - **Replay pins the first decision across mode/killswitch changes**
   **Priority:** P3
