@@ -41,7 +41,7 @@ def main() -> int:
     # 2. Policy concern (agent_os).
     print("\n[2] Policy  — agent_os.policies.PolicyEvaluator")
     decision = boundary._policy_evaluator().evaluate({"action": "tool.run", "subject": "agent-1"})
-    print(f"    evaluate(ctx: dict) -> PolicyDecision{{allowed, matched_rule, action, reason}}")
+    print("    evaluate(ctx: dict) -> PolicyDecision{allowed, matched_rule, action, reason}")
     print(f"    empty-policy decision.allowed = {decision.allowed}")
     assert decision.allowed is True, "expected AGT allow-by-default"
     print("    !! FINDING: AGT is fail-OPEN by default. Wrapper imposes deny-by-default (S3).")
@@ -62,7 +62,7 @@ def main() -> int:
     # 4. Identity concern (agentmesh) + the identity->audit compat point.
     print("\n[4] Identity — agentmesh.identity.AgentDID")
     print(f"    mint_did('loopay-agent-1') -> {did!r}")
-    print(f"    AuditEntry.agent_did is required -> identity MUST run before audit")
+    print("    AuditEntry.agent_did is required -> identity MUST run before audit")
     print(f"    stamped entry.agent_did = {entry.agent_did!r}")
     assert entry.agent_did == did
 

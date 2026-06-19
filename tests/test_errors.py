@@ -4,7 +4,6 @@ One base, ``GovernanceError``, so a caller can catch every recognised failure in
 one place and never let a tool slip through on an unclassified exception.
 """
 
-import pytest
 
 from zemtik_govern.errors import (
     GovernanceDenied,

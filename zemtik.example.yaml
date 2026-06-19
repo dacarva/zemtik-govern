@@ -1,0 +1,25 @@
+# zemtik-govern — example configuration
+#
+# Copy to zemtik.yaml and edit. Loaded by GovernanceConfig.load(path).
+# In `strict` mode the wrapper refuses to start without BOTH a policy source
+# (inline rules or a non-empty policy_dir) AND an audit sink.
+
+# strict | shadow | enforce  (strict is the secure default)
+mode: strict
+
+# Where the audit trail goes. "memory" uses the in-memory Merkle-chained log;
+# a file path selects the file sink (S5). Required in strict mode.
+audit_sink: memory
+
+# Inline policy rules. AGT fails OPEN on no match; the wrapper imposes
+# deny-by-default, so anything not explicitly allowed here is denied.
+rules:
+  - name: allow-tool-run
+    condition:
+      field: action
+      operator: eq
+      value: tool.run
+    action: allow
+
+# Alternatively, load rules from a directory of policy files instead of inline:
+# policy_dir: ./policies

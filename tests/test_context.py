@@ -38,6 +38,22 @@ def test_context_freezes_lists_into_tuples():
         ctx.payload["items"].append(4)
 
 
+def test_context_freezes_sets_into_frozensets():
+    """A set in payload becomes a frozenset — no in-place add/discard — and
+    thaws back to a list for JSON in to_dict."""
+    ctx = GovernanceContext(
+        action="scope", subject="agent-1", payload={"scopes": {"read", "write"}}
+    )
+    assert isinstance(ctx.payload["scopes"], frozenset)
+    assert ctx.payload["scopes"] == frozenset({"read", "write"})
+    with pytest.raises(AttributeError):
+        ctx.payload["scopes"].add("admin")
+    # thaws back to a JSON-serializable list
+    d = ctx.to_dict()
+    assert isinstance(d["payload"]["scopes"], list)
+    assert set(d["payload"]["scopes"]) == {"read", "write"}
+
+
 def test_to_dict_is_plain_mutable_json_serializable():
     """AGT's evaluate() and agentmesh serialization need plain Python — to_dict
     thaws the frozen views back to dict/list, with action/subject at top level."""

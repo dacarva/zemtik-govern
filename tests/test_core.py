@@ -5,12 +5,11 @@ These use lightweight fakes for the three seams so the test pins ORDER and
 CONTROL FLOW, not AGT internals (those are covered by the e2e test).
 """
 
-import asyncio
 
 import pytest
 
-from zemtik_govern.core import ZemtikGovern
 from zemtik_govern.context import GovernanceContext
+from zemtik_govern.core import ZemtikGovern
 from zemtik_govern.errors import GovernanceDenied, GovernanceError
 from zemtik_govern.protocols import Decision
 
@@ -87,6 +86,44 @@ async def test_govern_fails_closed_when_engine_errors():
         await gov.govern(_ctx())
     assert isinstance(exc.value.__cause__, ValueError)  # original is preserved
     assert "audit" in trace  # the system denial was recorded
+    assert seams.entries[-1].outcome == "error"
+
+
+class _IdentityRaises:
+    """Seams where identity itself fails — the pre-policy fault path."""
+
+    def __init__(self, trace):
+        self.trace = trace
+        self.entries = []
+
+    async def identify(self, subject):
+        self.trace.append("identity")
+        raise ConnectionError("identity backend down")
+
+    async def evaluate(self, ctx):  # must never be reached
+        self.trace.append("policy")
+        return Decision(allowed=True, action="allow", matched_rule="r", reason="ok")
+
+    async def write(self, entry):
+        self.trace.append("audit")
+        self.entries.append(entry)
+        return "evt-err"
+
+
+@pytest.mark.asyncio
+async def test_govern_fails_closed_when_identity_errors():
+    """An identity fault is inside the fail-closed boundary too: wrapped as
+    GovernanceError, audited as a system denial, policy never reached."""
+    trace = []
+    seams = _IdentityRaises(trace)
+    gov = ZemtikGovern(identity=seams, policy=seams, audit=seams)
+    with pytest.raises(GovernanceError) as exc:
+        await gov.govern(_ctx())
+    assert isinstance(exc.value.__cause__, ConnectionError)
+    assert "policy" not in trace  # policy never ran
+    assert trace[-1] == "audit"  # the failure was still recorded
+    # no DID resolved, so the entry is stamped unidentified
+    assert seams.entries[-1].agent_did == "did:mesh:unidentified"
     assert seams.entries[-1].outcome == "error"
 
 

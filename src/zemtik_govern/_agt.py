@@ -24,6 +24,31 @@ AGT_PINS: dict[str, str] = {
 }
 
 
+# --- agent_os -> agentmesh -> wrapper compat map ----------------------------
+# The single documented source of how AGT's policy verdict maps onto the
+# wrapper's own Decision, and how identity threads into audit. The spike
+# (spike/verify_agt_signatures.py) prints this; tests/test_agt_conformance.py
+# pins each fact in CI. Recorded here, in the boundary, because this is the one
+# module allowed to know AGT's surface.
+#
+#   agent_os.PolicyDecision.allowed       -> Decision.allowed   (BUT see note)
+#   agent_os.PolicyDecision.matched_rule  -> Decision.matched_rule
+#   agent_os.PolicyDecision.action        -> Decision.action
+#   agent_os.PolicyDecision.reason        -> Decision.reason  / AuditLog.log(policy_decision=)
+#   agentmesh AgentDID(unique_id)         -> did:mesh:<id>     -> AuditLog.log(agent_did=)
+#
+# NOTE (the moat): AGT fails OPEN — matched_rule is None => allowed=True. The
+# wrapper overrides that no-match case to a deny in AgentOsPolicy. So
+# PolicyDecision.allowed maps to Decision.allowed ONLY when a rule matched.
+AGT_COMPAT_MAP: dict[str, str] = {
+    "PolicyDecision.allowed": "Decision.allowed (only when matched_rule is not None)",
+    "PolicyDecision.matched_rule": "Decision.matched_rule",
+    "PolicyDecision.action": "Decision.action",
+    "PolicyDecision.reason": "Decision.reason / AuditLog.log(policy_decision=)",
+    "AgentDID(unique_id)": "did:mesh:<id> / AuditLog.log(agent_did=)",
+}
+
+
 class AGTVersionError(RuntimeError):
     """Raised when an installed AGT distribution does not match its pin."""
 

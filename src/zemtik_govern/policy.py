@@ -9,6 +9,8 @@ scattered across call sites.
 
 from __future__ import annotations
 
+from typing import Any
+
 from ._agt import AGTBoundary
 from .context import GovernanceContext
 from .protocols import Decision
@@ -17,7 +19,12 @@ from .protocols import Decision
 class AgentOsPolicy:
     """Deny-by-default policy engine backed by ``agent_os`` through the boundary."""
 
-    def __init__(self, boundary: AGTBoundary, rules=None, root_dir=None) -> None:
+    def __init__(
+        self,
+        boundary: AGTBoundary,
+        rules: list[dict[str, Any]] | None = None,
+        root_dir: str | None = None,
+    ) -> None:
         policies = [boundary._policy_document(rules)] if rules else None
         self._evaluator = boundary._policy_evaluator(policies=policies, root_dir=root_dir)
 

@@ -4,3 +4,6 @@
 .agents
 .venv/
 __pycache__/
+.coverage
+.pytest_cache/
+.ruff_cache/

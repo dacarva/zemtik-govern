@@ -24,7 +24,7 @@ class GovernanceDenied(GovernanceError):
     """A policy decided the action is not allowed. Carries the decision that
     blocked it so the reason survives into the caller and the audit trail."""
 
-    def __init__(self, decision: "Decision") -> None:
+    def __init__(self, decision: Decision) -> None:
         self.decision = decision
         reason = getattr(decision, "reason", str(decision))
         super().__init__(reason)

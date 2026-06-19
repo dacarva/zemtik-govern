@@ -60,9 +60,9 @@ class AuditEntry:
         cls,
         ctx: GovernanceContext,
         agent_did: str,
-        decision: "Decision",
+        decision: Decision,
         outcome: str | None = None,
-    ) -> "AuditEntry":
+    ) -> AuditEntry:
         if outcome is None:
             outcome = "success" if decision.allowed else "denied"
         return cls(
@@ -87,7 +87,7 @@ class PolicyEngine(Protocol):
     """Decides a context. MUST impose deny-by-default — raw AGT fails open, so an
     implementation that passes the unmatched case through is a moat breach."""
 
-    async def evaluate(self, ctx: GovernanceContext) -> "Decision": ...
+    async def evaluate(self, ctx: GovernanceContext) -> Decision: ...
 
 
 @runtime_checkable

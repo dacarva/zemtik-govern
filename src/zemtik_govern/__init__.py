@@ -12,6 +12,7 @@ __version__ = "0.1.0.dev0"
 
 from ._agt import AGTBoundary, AGTVersionError
 from .audit import AgentMeshAudit
+from .config import GovernanceConfig
 from .context import GovernanceContext
 from .core import ZemtikGovern
 from .errors import GovernanceDenied, GovernanceError, GovernanceNotConfigured
@@ -24,6 +25,7 @@ from .protocols import (
     IdentityProvider,
     PolicyEngine,
 )
+from .registry import GovernanceRegistry
 
 __all__ = [
     "__version__",
@@ -34,10 +36,12 @@ __all__ = [
     "AuditEntry",
     "AuditSink",
     "Decision",
+    "GovernanceConfig",
     "GovernanceContext",
     "GovernanceDenied",
     "GovernanceError",
     "GovernanceNotConfigured",
+    "GovernanceRegistry",
     "IdentityProvider",
     "PolicyEngine",
     "StaticIdentity",
