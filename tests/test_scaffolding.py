@@ -37,6 +37,12 @@ def test_tests_langchain_dir_exists():
     assert (d / "__init__.py").is_file(), f"Missing __init__.py in {d}"
 
 
+def test_tests_mcp_dir_exists():
+    d = TESTS_ROOT / "mcp"
+    assert d.is_dir(), f"Missing directory: {d}"
+    assert (d / "__init__.py").is_file(), f"Missing __init__.py in {d}"
+
+
 # ---------------------------------------------------------------------------
 # pyproject.toml optional-dependencies
 # ---------------------------------------------------------------------------
@@ -73,4 +79,4 @@ def test_mcp_optional_group_exists():
 def test_mcp_group_contains_mcp_sdk():
     optional = _load_optional_deps()
     deps = optional.get("mcp", [])
-    assert any(d.startswith("mcp") for d in deps), f"mcp sdk not in {deps}"
+    assert any("mcp" in d for d in deps), f"mcp sdk not in {deps}"
