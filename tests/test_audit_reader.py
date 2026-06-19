@@ -7,7 +7,6 @@ Red→Green cycles:
   3. proof(entry_id) returns a verifiable Merkle dict
   4. Wrong HMAC secret → verify() fails
 """
-import json
 import pytest
 
 from zemtik_govern._agt import AGTBoundary
