@@ -43,6 +43,10 @@ class Decision:
     matched_rule: str | None
     reason: str
     denial_kind: str | None = None  # "policy" | "system" | None when allowed
+    # Reserved enrichment fields — always ``None`` in v0.1.  Do NOT write code
+    # that reads live data from these fields; they are declared here to reserve
+    # the names for a future sprint that threads correlation and policy metadata
+    # through the core.  See TODOS.md ("Populate Decision enrichment fields").
     correlation_id: str | None = None
     policy_id: str | None = None
     policy_version: str | None = None

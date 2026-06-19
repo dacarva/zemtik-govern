@@ -252,7 +252,20 @@ class ZemtikGovern:
     async def _with_budget(self, coro):
         """Await *coro* under the configured decision budget. With no budget, a
         plain await; with one, ``asyncio.wait_for`` — whose ``TimeoutError`` is an
-        ordinary exception caught by the fail-closed boundary above."""
+        ordinary exception caught by the fail-closed boundary above.
+
+        **Known limitation (tracked in TODOS.md)**: ``asyncio.wait_for`` cancels
+        the inner coroutine on a timeout breach, but it cannot prevent a
+        *well-intentioned-but-wrong* engine from catching ``CancelledError``
+        internally and returning a value anyway.  In that CPython edge case
+        ``wait_for`` will return that value after the budget has already been
+        declared breached — effectively producing a post-breach result.  This
+        guard therefore assumes that identity and policy engines are
+        *cancellation-safe*: they do not catch ``asyncio.CancelledError`` and
+        swallow it.  Fixing this properly requires a more invasive design (shield
+        + cancel + re-await with a secondary timeout), which is deferred to a
+        future sprint.
+        """
         if self._timeout is None:
             return await coro
         return await asyncio.wait_for(coro, self._timeout)

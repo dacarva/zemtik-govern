@@ -75,6 +75,13 @@ def emit_fallback(
 ) -> dict[str, Any]:
     """Write the redacted record to the fixed-path file (mode 0600) and stderr.
 
+    Returns the redacted record dict that was written.  This return value is
+    **part of the public contract**: tests and introspection code may inspect it
+    to verify redaction without re-reading the fallback file.  The only caller
+    inside the library (:mod:`zemtik_govern.audit.log`) does not use the return
+    value (it raises :class:`~zemtik_govern.errors.GovernanceError` immediately
+    after), which is fine — the write-then-raise sequence is correct regardless.
+
     Never raises into the caller: the primary-sink failure is already being
     handled fail-closed, and a secondary I/O error must not mask that.
     """
