@@ -283,6 +283,62 @@ any tamper or gap detected.
 Return a Merkle proof for a written entry. Requires at least two entries in the
 log for a sibling path to exist.
 
+### `AuditReader(path, boundary, secret)`
+
+Cold-read auditor module. Reads a durable `.jsonl` trail written by
+`AgentMeshAudit` without touching an active session.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `path` | `str \| Path` | Path to the `.jsonl` audit file. |
+| `boundary` | `AGTBoundary` | Used to open a fresh `FileAuditSink` for HMAC verification. |
+| `secret` | `bytes \| str` | HMAC secret (`$ZEMTIK_AUDIT_SECRET`). |
+
+#### `records() → list[AuditRecord]`
+
+Return all entries in the trail as a list of typed, frozen `AuditRecord`
+dataclasses. Fields: `entry_id`, `agent_did`, `action`, `outcome`, `event_type`,
+`policy_decision`, `timestamp`, `payload`.
+
+#### `verify() → (bool, str | None)`
+
+Verify the Merkle chain + HMAC signatures by opening a fresh `FileAuditSink` on
+the file. Returns `(True, None)` when the chain is intact; `(False, reason)` when
+any entry has been modified, deleted, reordered, or when the HMAC secret is wrong.
+Cold-read isolation: a new sink is created on every call so in-memory state never
+masks a tampered file.
+
+#### `proof(entry_id: str) → dict`
+
+Return a chain inclusion proof for `entry_id`. The dict contains:
+
+| Key | Description |
+|-----|-------------|
+| `entry` | The raw entry dict from the file. |
+| `merkle_proof` | List of `(entry_hash, entry_id)` tuples from genesis to the target. |
+| `merkle_root` | `entry_hash` of the last entry in the trail. |
+| `verified` | `True` when every `previous_hash` link from genesis to this entry is intact. |
+
+An auditor can independently verify: for each consecutive pair in `merkle_proof`,
+the second entry's `previous_hash` must equal the first entry's hash.
+
+### `AuditRecord`
+
+Frozen dataclass representing one entry from the durable audit trail.
+
+```python
+@dataclass(frozen=True)
+class AuditRecord:
+    entry_id: str
+    agent_did: str
+    action: str
+    outcome: str          # "success" | "denied" | "error" | "replay"
+    event_type: str       # "tool_invoked" | "tool_blocked"
+    policy_decision: str | None
+    timestamp: str
+    payload: dict
+```
+
 ---
 
 ## AGT Boundary

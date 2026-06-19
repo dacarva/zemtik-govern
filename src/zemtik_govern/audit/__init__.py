@@ -6,9 +6,12 @@ zemtik_govern.audit import AgentMeshAudit`` still works.
 
 from .fallback import DEFAULT_FALLBACK_PATH, emit_fallback, redacted_record
 from .log import AgentMeshAudit
+from .reader import AuditReader, AuditRecord
 
 __all__ = [
     "AgentMeshAudit",
+    "AuditReader",
+    "AuditRecord",
     "DEFAULT_FALLBACK_PATH",
     "emit_fallback",
     "redacted_record",

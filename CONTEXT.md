@@ -20,6 +20,15 @@ Names for the good seams. Use these terms in tests, reviews, and code — not
   mapping (`tool_invoked`/`tool_blocked`, `success`/`denied`/`error`).
 - **AgentMeshAudit** — adapter over agentmesh's Merkle-chained `AuditLog`; the one
   place that knows agentmesh's kwarg names.
+- **AuditReader** — cold-read auditor module. Reads a durable `.jsonl` trail
+  written by `AgentMeshAudit` without touching an active session. Three
+  capabilities: `records()` returns typed `AuditRecord` values; `verify()` re-runs
+  the two-layer tamper-evidence check (HMAC + Merkle chain) via a fresh sink on
+  every call; `proof(entry_id)` returns a chain inclusion proof verifiable without
+  the running process.
+- **AuditRecord** — frozen dataclass for one audit trail entry. The typed value
+  `AuditReader.records()` returns: `entry_id`, `agent_did`, `action`, `outcome`,
+  `event_type`, `policy_decision`, `timestamp`, `payload`.
 - **AgentRef** — the typed value the identity seam returns (not a bare string).
   v0.1 carries only the `did:mesh:<subject>` string; it is the seam where issuer /
   key / claims attach in v0.2 without changing the `IdentityProvider` contract.

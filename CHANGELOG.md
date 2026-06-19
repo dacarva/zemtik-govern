@@ -25,6 +25,30 @@ Comprehensive documentation added in this sprint:
   `GovernanceContext`, `Decision`, `AuditEntry`, protocols, config, registry,
   errors, and audit.
 
+### Added (audit-reader-feature)
+
+- **`AuditReader` / `AuditRecord`** (`audit/reader.py`) — cold-read auditor module.
+  Reads a durable `.jsonl` trail written by `AgentMeshAudit` without touching an
+  active session. Three capabilities: `records()` returns all entries as typed
+  `AuditRecord` frozen dataclasses; `verify()` re-runs the two-layer tamper-evidence
+  check (HMAC signature + Merkle `previous_hash` chain) via a fresh `FileAuditSink`;
+  `proof(entry_id)` returns a chain inclusion proof an auditor can verify
+  independently — every `previous_hash` link from genesis to the target entry.
+  Cold-read isolation is explicit: a new sink is opened per `verify()` call so
+  in-memory session state never hides a tampered file. Exported from
+  `zemtik_govern.audit`.
+- **`sandbox/qa_demo.py`** — manual QA script exercising all 10 stated security
+  guarantees of the three-seam pipeline (deny-by-default, fail-closed identity/
+  policy faults, shadow mode, idempotency replay/conflict, proxy effect-idempotency,
+  context immutability, durable Merkle-verified audit).
+- **`sandbox/auditor.py`** — end-to-end auditor workflow demo: generates a
+  6-event governed workload, prints a human-readable event log (who, what,
+  authorized by, when), verifies the Merkle chain, extracts an inclusion proof for
+  a specific event, and demonstrates tamper detection (deletion of any entry breaks
+  the chain at the successor's `previous_hash`).
+
+---
+
 S1–S7 of the governance wrapper: the AGT boundary, the M0 skeleton, and the
 fail-closed policy core, plus config/registry/proxy wiring and a hardened CI
 supply-chain gate — now with operational safety modes (S4), the durable,
