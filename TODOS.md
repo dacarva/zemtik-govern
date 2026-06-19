@@ -135,6 +135,8 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   A governance wrapper must be supply-chain clean — a compromised dep could
   subvert the identity→policy→audit pipeline silently. Deferred from sprint
   plan E7.
+  **Completed:** v0.0.1.0 (2026-06-19) — `requirements-dev.lock` with `--require-hashes`
+  install is wired in CI; `pip-audit` OSV gate runs against `requirements.lock`.
 
 - **Adversarial test matrix — E9** (issue #25)
   **Priority:** P1

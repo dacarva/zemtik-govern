@@ -317,7 +317,7 @@ Return a chain inclusion proof for `entry_id`. The dict contains:
 | `entry` | The raw entry dict from the file. |
 | `merkle_proof` | List of `(entry_hash, entry_id)` tuples from genesis to the target. |
 | `merkle_root` | `entry_hash` of the last entry in the trail. |
-| `verified` | `True` when every `previous_hash` link from genesis to this entry is intact. |
+| `verified` | `True` when every `previous_hash` link from genesis to this entry is intact AND the full HMAC chain (`verify()`) passes. A wrong secret or tampered payload fails both. |
 
 An auditor can independently verify: for each consecutive pair in `merkle_proof`,
 the second entry's `previous_hash` must equal the first entry's hash.

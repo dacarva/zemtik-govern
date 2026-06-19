@@ -12,6 +12,11 @@ via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
   optional dependency groups (`pip install zemtik-govern[langchain]` and
   `[mcp]`). Implementation stubs are in place for the upcoming
   `govern_tool()` API (issue #15) and `GovernedMCPServer` (issue #20).
+- **`zemtik init langchain` CLI** — `python -m zemtik_govern.cli init langchain`
+  scaffolds a `govern.yaml` from LangChain tool introspection. Pass
+  `--tools-module my_agent.tools` to auto-generate commented-out allow rules
+  for each discovered tool; `--output govern.yaml` to write to a file instead
+  of stdout. Developer-only: `--tools-module` accepts arbitrary import paths.
 - **`tests/mcp/`** — test directory scaffolding mirroring `tests/langchain/`.
 
 ### Fixed

@@ -97,7 +97,7 @@ python spike/verify_agt_signatures.py
 - `src/zemtik_govern/policy.py` — `AgentOsPolicy`: deny-by-default moat.
 - `src/zemtik_govern/audit/` — `AgentMeshAudit` (Merkle-chained adapter),
   `AuditReader` / `AuditRecord` (cold-read auditor module).
-- `tests/` — 17 test modules including adversarial and pressure tests.
+- `tests/` — 19 test modules including adversarial, pressure, CLI, and audit reader tests.
 - `sandbox/qa_demo.py` — manual QA script exercising all 10 security guarantees.
 - `sandbox/auditor.py` — end-to-end auditor workflow demo (report, chain verify, inclusion proof, tamper detection).
 - `spike/` — executable verification of the AGT surface.
