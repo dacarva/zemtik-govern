@@ -64,6 +64,42 @@ Returns a dict containing the sibling hashes needed to reproduce the root hash.
 What proofs provide: cryptographic evidence that a specific entry was recorded and
 not modified. They do not provide non-repudiation (signing key is shared).
 
+### Cold-read auditor workflow
+
+An auditor who receives a `.jsonl` file and the HMAC secret but has no access to
+the live process can use `AuditReader` for all three operations:
+
+```python
+from zemtik_govern._agt import AGTBoundary
+from zemtik_govern.audit import AuditReader
+
+reader = AuditReader("path/to/audit.jsonl", AGTBoundary(), secret="your-signing-key")
+
+# 1. Verify the full chain (HMAC + previous_hash links) from disk
+ok, err = reader.verify()
+assert ok, f"chain broken: {err}"
+
+# 2. Read all entries as typed records
+for r in reader.records():
+    print(r.timestamp, r.agent_did, r.action, r.outcome, r.policy_decision)
+
+# 3. Prove a specific event by its entry_id
+proof = reader.proof("audit_36f55e0aaea34730")
+assert proof["verified"]
+```
+
+`verify()` opens a fresh `FileAuditSink` on each call — in-memory session state
+never hides a tampered file. `proof()` builds a chain inclusion proof by traversing
+`previous_hash` links from genesis to the target entry; an auditor can verify it
+independently without the running process.
+
+Run `sandbox/auditor.py` for a full demo (workload generation → report → chain
+verification → inclusion proof → tamper detection):
+
+```bash
+ZEMTIK_AUDIT_SECRET=your-signing-key python sandbox/auditor.py
+```
+
 ---
 
 ## Emergency Fallback Channel
