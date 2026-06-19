@@ -17,6 +17,12 @@ Status: pre-v0.1. Apache-2.0.
 ```bash
 uv venv .venv --python 3.11 && source .venv/bin/activate
 uv pip install -e ".[dev]"
+
+# Optional: LangChain integration
+uv pip install -e ".[langchain]"
+
+# Optional: MCP integration
+uv pip install -e ".[mcp]"
 ```
 
 Write a `zemtik.yaml` config (see [`zemtik.example.yaml`](zemtik.example.yaml)):
@@ -72,6 +78,9 @@ pytest tests/test_core.py::test_govern_order -v
 # Lint
 ruff check src/
 
+# Scaffold a govern.yaml from LangChain tool introspection
+python -m zemtik_govern.cli init langchain --tools-module my_agent.tools --output govern.yaml
+
 # AGT surface verification (human-readable)
 python spike/verify_agt_signatures.py
 ```
@@ -81,12 +90,14 @@ python spike/verify_agt_signatures.py
 - `src/zemtik_govern/_agt.py` — the **single** sanctioned AGT import boundary.
   Pins are asserted at construction; no other module touches `agent_os` /
   `agentmesh` directly.
+- `src/zemtik_govern/cli/` — `zemtik init langchain` subcommand: scaffolds a
+  `govern.yaml` from LangChain tool introspection.
 - `src/zemtik_govern/core.py` — `ZemtikGovern` orchestrator, idempotency ledger,
   `_GovernedProxy`.
 - `src/zemtik_govern/policy.py` — `AgentOsPolicy`: deny-by-default moat.
 - `src/zemtik_govern/audit/` — `AgentMeshAudit` (Merkle-chained adapter),
   `AuditReader` / `AuditRecord` (cold-read auditor module).
-- `tests/` — 17 test modules including adversarial and pressure tests.
+- `tests/` — 19 test modules including adversarial, pressure, CLI, and audit reader tests.
 - `sandbox/qa_demo.py` — manual QA script exercising all 10 security guarantees.
 - `sandbox/auditor.py` — end-to-end auditor workflow demo (report, chain verify, inclusion proof, tamper detection).
 - `spike/` — executable verification of the AGT surface.

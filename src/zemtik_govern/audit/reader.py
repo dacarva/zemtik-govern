@@ -108,21 +108,31 @@ class AuditReader:
         if target is None:
             return {"entry": None, "merkle_proof": [], "merkle_root": None, "verified": False}
 
-        def _hash(e: dict) -> str:
-            return e.get("entry_hash") or e.get("content_hash") or ""
+        def _hash(e: dict) -> str | None:
+            # Return None when hash fields are absent so chain comparison fails
+            # on tampered entries (prevents "" == "" bypass).
+            return e.get("entry_hash") or e.get("content_hash") or None
 
         idx = entries.index(target)
         chain = entries[: idx + 1]
 
-        # Verify each previous_hash link from genesis to target
+        # Verify each previous_hash link from genesis to target.
+        # Missing hash fields on any entry (None) are treated as tampered.
         chain_ok = True
         for i in range(1, len(chain)):
-            if chain[i].get("previous_hash") != _hash(chain[i - 1]):
+            prev = _hash(chain[i - 1])
+            if prev is None or chain[i].get("previous_hash") != prev:
                 chain_ok = False
                 break
 
-        merkle_proof = [(_hash(e), e["entry_id"]) for e in chain]
-        merkle_root = _hash(entries[-1])
+        # Also require HMAC integrity — proof()['verified'] must not be weaker
+        # than verify().  A wrong secret or tampered payload fails both checks.
+        if chain_ok:
+            hmac_ok, _ = self.verify()
+            chain_ok = hmac_ok
+
+        merkle_proof = [(_hash(e) or "", e["entry_id"]) for e in chain]
+        merkle_root = _hash(entries[-1]) or ""
 
         return {
             "entry": target,

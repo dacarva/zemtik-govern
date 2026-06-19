@@ -79,4 +79,4 @@ def test_mcp_optional_group_exists():
 def test_mcp_group_contains_mcp_sdk():
     optional = _load_optional_deps()
     deps = optional.get("mcp", [])
-    assert any("mcp" in d for d in deps), f"mcp sdk not in {deps}"
+    assert any(d == "mcp" or d.startswith(("mcp>=", "mcp~=", "mcp==")) for d in deps), f"mcp sdk not in {deps}"

@@ -197,3 +197,54 @@ async def test_verify_fails_with_wrong_secret(tmp_path):
     ok, _ = reader.verify()
 
     assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# Cycle 5 — proof() edge cases
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_proof_unknown_entry_id_returns_not_found(tmp_path):
+    """proof() with an entry_id not in the trail returns the not-found sentinel."""
+    audit_file = tmp_path / "audit.jsonl"
+    boundary, _, _ = await _write_trail(audit_file)
+
+    reader = AuditReader(audit_file, boundary, _SECRET)
+    p = reader.proof("does-not-exist")
+
+    assert p["entry"] is None
+    assert p["merkle_proof"] == []
+    assert p["merkle_root"] is None
+    assert p["verified"] is False
+
+
+@pytest.mark.asyncio
+async def test_proof_last_entry_chain_traverses_all_links(tmp_path):
+    """proof() for the last (3rd) entry traverses the full previous_hash chain."""
+    audit_file = tmp_path / "audit.jsonl"
+    boundary, _, last_event_id = await _write_trail(audit_file)
+
+    reader = AuditReader(audit_file, boundary, _SECRET)
+    p = reader.proof(last_event_id)
+
+    assert p["verified"] is True
+    # merkle_proof must span all 3 entries (genesis → middle → target)
+    assert len(p["merkle_proof"]) == 3
+    assert p["merkle_root"]
+
+
+# ---------------------------------------------------------------------------
+# Cycle 6 — AuditReader accepts str secret (not only bytes)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_reader_accepts_str_secret(tmp_path):
+    """AuditReader.__init__ encodes str secret to bytes transparently."""
+    audit_file = tmp_path / "audit.jsonl"
+    boundary, _, _ = await _write_trail(audit_file, secret=b"str-secret-test")
+
+    # Pass the same secret as a plain str — must not raise and must verify
+    reader = AuditReader(audit_file, boundary, "str-secret-test")
+    ok, err = reader.verify()
+
+    assert ok is True, f"verify() failed with str secret: {err}"
