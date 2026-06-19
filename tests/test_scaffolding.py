@@ -1,8 +1,7 @@
 """Tests for issue #14: project scaffolding — optional deps + directory structure."""
 
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).parent.parent
 SRC_ROOT = REPO_ROOT / "src" / "zemtik_govern"
