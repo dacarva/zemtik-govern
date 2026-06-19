@@ -72,12 +72,15 @@ class Killswitch:
     """
 
     def __init__(self, engaged: bool = False) -> None:
+        """Start in the given state (default: not engaged)."""
         self.engaged = engaged
 
     def engage(self) -> None:
+        """Activate the switch: route to fallback on the next governance call."""
         self.engaged = True
 
     def disengage(self) -> None:
+        """Deactivate: restore the primary policy path."""
         self.engaged = False
 
     def __call__(self) -> bool:
@@ -98,6 +101,21 @@ class ZemtikGovern:
         killswitch: Callable[[], bool] | None = None,
         timeout: float | None = None,
     ) -> None:
+        """
+        Args:
+            identity: Resolves subject strings to :class:`AgentRef` DIDs.
+            policy: Evaluates a frozen context to a :class:`Decision`.
+            audit: Records every outcome; called on allow, deny, and system error.
+            mode: ``"strict"`` / ``"enforce"`` raise on deny; ``"shadow"`` records
+                but does not enforce.
+            fallback: Alternate :class:`PolicyEngine` to use when *killswitch* is
+                engaged. Engaging with no fallback fails closed.
+            killswitch: Zero-arg callable returning ``True`` when the switch is
+                engaged. Typically a :class:`Killswitch` instance.
+            timeout: Per-call decision budget (seconds) shared across identity +
+                policy. A breach is a system denial, not an allow. ``None`` means
+                no budget (not recommended for latency-sensitive paths).
+        """
         self._identity = identity
         self._policy = policy
         self._audit = audit
@@ -234,7 +252,20 @@ class ZemtikGovern:
     async def _with_budget(self, coro):
         """Await *coro* under the configured decision budget. With no budget, a
         plain await; with one, ``asyncio.wait_for`` — whose ``TimeoutError`` is an
-        ordinary exception caught by the fail-closed boundary above."""
+        ordinary exception caught by the fail-closed boundary above.
+
+        **Known limitation (tracked in TODOS.md)**: ``asyncio.wait_for`` cancels
+        the inner coroutine on a timeout breach, but it cannot prevent a
+        *well-intentioned-but-wrong* engine from catching ``CancelledError``
+        internally and returning a value anyway.  In that CPython edge case
+        ``wait_for`` will return that value after the budget has already been
+        declared breached — effectively producing a post-breach result.  This
+        guard therefore assumes that identity and policy engines are
+        *cancellation-safe*: they do not catch ``asyncio.CancelledError`` and
+        swallow it.  Fixing this properly requires a more invasive design (shield
+        + cancel + re-await with a secondary timeout), which is deferred to a
+        future sprint.
+        """
         if self._timeout is None:
             return await coro
         return await asyncio.wait_for(coro, self._timeout)
@@ -349,6 +380,13 @@ class _GovernedProxy:
     def _build_ctx(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> GovernanceContext:
+        """Build the governance context for a call.
+
+        Delegates to *context_factory* when provided; falls back to wrapping
+        args/kwargs in a plain payload dict. Raises :class:`GovernanceError` if
+        the factory returns the wrong type — a mis-shaped context would be
+        governed under unknown values, which is worse than refusing the call.
+        """
         if self._context_factory is not None:
             ctx = self._context_factory(*args, **kwargs)
             if not isinstance(ctx, GovernanceContext):
@@ -366,6 +404,7 @@ class _GovernedProxy:
         )
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        """Govern then invoke. Raises on deny before the wrapped callable runs."""
         ctx = self._build_ctx(args, kwargs)
         key = ctx.idempotency_key
         if key is None:
@@ -417,10 +456,16 @@ class _GovernedProxy:
     async def _effect(
         self, ctx: GovernanceContext, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> Any:
+        """Govern then invoke for the first caller on a keyed request.
+
+        Only successful results are cached; a denial or tool exception propagates
+        and evicts the slot so a retry re-runs both governance and the tool.
+        """
         await self._gov.govern(ctx)  # raises on deny -> the tool never runs
         return await self._invoke(args, kwargs)
 
     async def _invoke(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        """Call the wrapped function, awaiting if it returns a coroutine."""
         result = self._fn(*args, **kwargs)
         if inspect.isawaitable(result):
             return await result

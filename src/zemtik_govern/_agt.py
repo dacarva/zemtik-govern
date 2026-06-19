@@ -58,6 +58,14 @@ def assert_pins(pins: dict[str, str] = AGT_PINS) -> dict[str, str]:
 
     Returns the resolved versions on success; raises :class:`AGTVersionError`
     on the first mismatch or missing distribution.
+
+    UX note: the function raises on the *first* mismatch rather than collecting
+    all mismatches.  This is intentional: in a correctly-pinned environment the
+    common case is zero failures; a fast-fail on the first bad distribution is
+    safe (no ungoverned tool will run regardless of which pin failed) and keeps
+    the code simple.  An operator who needs to audit all installed versions can
+    run ``importlib.metadata.version`` on each distribution directly.  This is a
+    UX trade-off, not a security gap — any single mismatch is a hard abort.
     """
     resolved: dict[str, str] = {}
     for dist, expected in pins.items():

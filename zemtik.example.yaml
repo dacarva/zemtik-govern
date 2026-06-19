@@ -22,6 +22,14 @@ audit_sink: memory
 
 # Inline policy rules. AGT fails OPEN on no match; the wrapper imposes
 # deny-by-default, so anything not explicitly allowed here is denied.
+#
+# Rule shape verified against AGT's PolicyDocument / PolicyRule / PolicyCondition
+# interface (agent_os.policies.schema):
+#   name      — str (required, unique within document)
+#   condition — PolicyCondition: {field: str, operator: str, value: Any}
+#   action    — PolicyAction: "allow" | "deny"
+# Optional rule fields (not shown): priority (int, default 0), message (str),
+# override (bool).
 rules:
   - name: allow-tool-run
     condition:

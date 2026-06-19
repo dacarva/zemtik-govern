@@ -10,7 +10,17 @@ from typing import Any
 
 def _deep_freeze(value: Any) -> Any:
     """A deeply-immutable view of *value*: dicts → read-only ``MappingProxyType``,
-    sequences → tuples, sets → frozensets, scalars unchanged. Mutable at no depth."""
+    sequences → tuples, sets → frozensets, scalars unchanged. Mutable at no depth.
+
+    **Constraint**: sets (and frozensets) whose elements are unhashable (e.g.
+    dicts, lists) will raise ``TypeError`` at construction time because
+    ``frozenset()`` requires hashable elements.  Callers must ensure that any set
+    in *value* contains only JSON-serializable, hashable leaf values (strings,
+    numbers, booleans, ``None``).  This is a programmer-error constraint — a
+    ``TypeError`` from a dict-containing set is not a governance event and is not
+    wrapped in :class:`~zemtik_govern.errors.GovernanceError`.  See also:
+    :class:`GovernanceContext` docstring.
+    """
     if isinstance(value, Mapping):
         return MappingProxyType({k: _deep_freeze(v) for k, v in value.items()})
     if isinstance(value, (list, tuple)):
@@ -31,7 +41,15 @@ def _thaw(value: Any) -> Any:
 
 @dataclass(frozen=True)
 class GovernanceContext:
-    """One governed request. Frozen; payload/extra deep-frozen on construction."""
+    """One governed request. Frozen; payload/extra deep-frozen on construction.
+
+    **Constraint on sets**: if ``payload`` or ``extra`` contain a ``set`` or
+    ``frozenset``, every element must be hashable (strings, numbers, booleans,
+    ``None``).  A set containing a ``dict`` or ``list`` will cause
+    :func:`_deep_freeze` to raise ``TypeError`` during ``__post_init__``.  This
+    is a programmer error — convert dicts inside sets to tuples of pairs or
+    similar hashable representations before constructing the context.
+    """
 
     action: str
     subject: str
