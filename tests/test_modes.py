@@ -10,6 +10,7 @@ import pytest
 from zemtik_govern.context import GovernanceContext
 from zemtik_govern.core import Killswitch, ZemtikGovern
 from zemtik_govern.errors import GovernanceDenied, GovernanceError
+from zemtik_govern.identity import AgentRef
 from zemtik_govern.protocols import Decision
 
 _ALLOW = Decision(allowed=True, action="allow", matched_rule="r", reason="ok")
@@ -27,7 +28,7 @@ class _Seams:
         self.entries = []
 
     async def identify(self, subject):
-        return "did:mesh:" + subject
+        return AgentRef(did="did:mesh:" + subject)
 
     async def evaluate(self, ctx):
         return self._decision
@@ -98,6 +99,11 @@ async def test_killswitch_reverts_governed():
     with pytest.raises(GovernanceDenied) as exc:
         await gov.govern(_ctx())
     assert exc.value.decision.reason == "fallback governed deny"
+
+    # switch back off: routing reverts to the wrapper's own policy, which allows
+    ks.disengage()
+    restored = await gov.govern(_ctx())
+    assert restored.allowed is True
 
 
 @pytest.mark.asyncio

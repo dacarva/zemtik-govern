@@ -40,19 +40,45 @@ async def test_e2e_allow_then_deny_with_verifiable_audit():
     gov, audit = _wire()
 
     # allow path — matched rule, returns a Decision stamped with its audit id
-    allowed = await gov.govern(GovernanceContext(action="tool.run", subject="loopay-1"))
+    allowed = await gov.govern(GovernanceContext(action="tool.run", subject="agent-1"))
     assert allowed.allowed is True
     assert allowed.audit_event_id is not None
 
     # deny path — deny-by-default raises, but the denial is audited first
     with pytest.raises(GovernanceDenied) as exc:
-        await gov.govern(GovernanceContext(action="wire.transfer", subject="loopay-1"))
+        await gov.govern(GovernanceContext(action="wire.transfer", subject="agent-1"))
     assert exc.value.decision.denial_kind == "policy"
 
     # the tamper-evident chain holds across both outcomes (>=2 entries)
     ok, err = audit.verify_integrity()
     assert ok, err
     assert audit.get_proof(allowed.audit_event_id) is not None
+
+
+# --- S6 end-to-end: identity stamps the audit trail --------------------------
+
+
+@pytest.mark.asyncio
+async def test_e2e_identity_stamps_agent_did_on_durable_audit(tmp_path, monkeypatch):
+    """Through the live stack, StaticIdentity resolves the subject to its
+    did:mesh DID and that DID is what every durable audit entry is stamped with —
+    no faked random identity reaches the trail."""
+    from zemtik_govern.config import GovernanceConfig
+    from zemtik_govern.registry import GovernanceRegistry
+
+    monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "s6-secret")
+    audit_file = tmp_path / "audit.jsonl"
+    cfg = GovernanceConfig(
+        mode="strict", rules=[_ALLOW_TOOL_RUN], audit_sink=str(audit_file)
+    )
+    boundary = AGTBoundary()
+    gov = GovernanceRegistry.from_config(cfg, boundary).build()
+
+    await gov.govern(GovernanceContext(action="tool.run", subject="agent-7"))
+
+    body = audit_file.read_text(encoding="utf-8")
+    assert "did:mesh:agent-7" in body  # identity, deterministic, stamped on audit
+    assert "secrets" not in body  # never a random token_hex identity
 
 
 # --- S4/S5 end-to-end: modes, kill-switch, durable + fallback audit ----------
@@ -84,7 +110,7 @@ async def test_e2e_shadow_mode_observes_real_deny_without_blocking():
     tool = gov.proxy(
         lambda amount: ran.append(amount),
         action="wire.transfer",
-        subject="loopay-1",
+        subject="agent-1",
     )
     await tool(500)
 
@@ -113,7 +139,7 @@ async def test_e2e_killswitch_reverts_to_governed_fallback():
         killswitch=ks,
     )
 
-    ctx = GovernanceContext(action="tool.run", subject="loopay-1")
+    ctx = GovernanceContext(action="tool.run", subject="agent-1")
     assert (await gov.govern(ctx)).allowed is True  # primary allows
 
     ks.engage()
@@ -137,9 +163,9 @@ async def test_e2e_durable_file_audit_sink_writes_and_verifies(tmp_path, monkeyp
     boundary = AGTBoundary()
     gov = GovernanceRegistry.from_config(cfg, boundary).build()
 
-    await gov.govern(GovernanceContext(action="tool.run", subject="loopay-1"))
+    await gov.govern(GovernanceContext(action="tool.run", subject="agent-1"))
     with pytest.raises(GovernanceDenied):
-        await gov.govern(GovernanceContext(action="wire.transfer", subject="loopay-1"))
+        await gov.govern(GovernanceContext(action="wire.transfer", subject="agent-1"))
 
     # both outcomes landed durably on disk (one JSON line each)
     lines = [ln for ln in audit_file.read_text(encoding="utf-8").splitlines() if ln.strip()]
@@ -175,7 +201,7 @@ async def test_e2e_audit_failure_falls_back_redacted_and_denies(tmp_path):
     tool = gov.proxy(
         lambda **kw: ran.append(kw),
         action="tool.run",
-        subject="loopay-1",
+        subject="agent-1",
     )
     from zemtik_govern.errors import GovernanceError
 

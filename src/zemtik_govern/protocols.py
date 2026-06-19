@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
 from .context import GovernanceContext
+from .identity.protocols import AgentRef
 
 
 @dataclass(frozen=True)
@@ -28,6 +29,13 @@ class Decision:
     re-deriving it: ``denial_kind`` separates a policy deny from a system
     (fail-closed) deny; ``correlation_id`` threads one request across policy and
     audit; ``audit_event_id`` back-links to the written entry.
+
+    ``replayed`` is True when this decision was served from the idempotency ledger
+    rather than freshly evaluated. A *direct* ``govern``/``govern_sync`` caller that
+    performs its own side effect MUST gate on it (``if d.allowed and not
+    d.replayed: do_write()``) — otherwise a retried fintech write executes twice.
+    Callers that go through :meth:`ZemtikGovern.proxy` get effect-idempotency for
+    free and need not check this.
     """
 
     allowed: bool
@@ -39,6 +47,7 @@ class Decision:
     policy_id: str | None = None
     policy_version: str | None = None
     audit_event_id: str | None = None
+    replayed: bool = False  # True when served from the idempotency ledger
 
 
 @dataclass(frozen=True)
@@ -89,10 +98,10 @@ class AuditEntry:
 
 @runtime_checkable
 class IdentityProvider(Protocol):
-    """Resolves a subject to a stable DID. Runs FIRST: policy may key on the
-    subject and every audit entry is stamped with the DID."""
+    """Resolves a subject to a stable :class:`AgentRef`. Runs FIRST: policy may key
+    on the subject and every audit entry is stamped with the resolved DID."""
 
-    async def identify(self, subject: str) -> str: ...
+    async def identify(self, subject: str) -> AgentRef: ...
 
 
 @runtime_checkable

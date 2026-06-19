@@ -11,6 +11,7 @@ import pytest
 from zemtik_govern.context import GovernanceContext
 from zemtik_govern.core import ZemtikGovern
 from zemtik_govern.errors import GovernanceDenied, GovernanceError
+from zemtik_govern.identity import AgentRef
 from zemtik_govern.protocols import Decision
 
 
@@ -27,7 +28,7 @@ class _RecordingSeams:
 
     async def identify(self, subject):
         self.trace.append("identity")
-        return "did:mesh:" + subject
+        return AgentRef(did="did:mesh:" + subject)
 
     async def evaluate(self, ctx):
         self.trace.append("policy")

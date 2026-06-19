@@ -4,7 +4,8 @@ Every failure the wrapper recognises descends from :class:`GovernanceError`, so 
 caller can ``except GovernanceError`` once and never have a tool slip through on
 an unclassified exception. The moat depends on it: an *unexpected* exception
 inside ``govern()`` is wrapped here and audited as a denial — never swallowed,
-never a ``NullGovernanceProvider`` fall-through (loopay ``scheduler.py:29-30``).
+never a ``NullGovernanceProvider`` fall-through (the prior ungoverned scheduler
+path this wrapper replaces).
 """
 
 from __future__ import annotations

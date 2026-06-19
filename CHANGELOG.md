@@ -6,13 +6,53 @@ via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 
 ## [Unreleased]
 
-S1–S5 of the governance wrapper: the AGT boundary, the M0 skeleton, and the
+S1–S7 of the governance wrapper: the AGT boundary, the M0 skeleton, and the
 fail-closed policy core, plus config/registry/proxy wiring and a hardened CI
-supply-chain gate — now with operational safety modes (S4) and the durable,
-fallback-protected audit trail (S5).
+supply-chain gate — now with operational safety modes (S4), the durable,
+fallback-protected audit trail (S5), the typed identity seam (S6), and the
+adversarial + pressure-test gate that proves the abstraction survives both a
+blocking fintech write and a latency-sensitive voice turn (S7).
 
 ### Added
 
+- **Identity seam** (S6, `identity/`) — `identity.py` becomes a package.
+  `StaticIdentity` now resolves a subject to a typed `AgentRef` (`did:mesh:<subject>`,
+  minted behind the AGT boundary) instead of a bare string, replacing a faked
+  random per-call identity. `IdentityProvider.identify` returns `AgentRef`; the
+  core stamps `agent_did` from it onto every audit entry, identity-first. The
+  Protocol is the only public interface — `StaticIdentity` is an impl detail a
+  real Ed25519/`did:web` provider swaps for without touching the core.
+- **Idempotency replay guard** (S7, `core.py`) — `govern()` serialises calls on
+  `idempotency_key` so a concurrent duplicate is a deterministic *replay*
+  (recorded with a `replay` outcome, re-applying the original decision), never a
+  silently re-evaluated fresh request. The key is bound to a request fingerprint
+  (action + subject + payload): a key reused for a *different* request is a
+  conflict, audited and failed closed — it never replays a prior allow onto an
+  unevaluated action, and the conflict entry is stamped with the unidentified DID
+  (the conflicting request was never identity-resolved, so it is never attributed
+  to the first key holder). `_GovernedProxy` extends this from decision- to
+  *effect*-idempotency: a keyed duplicate (sequential or concurrent) re-runs
+  `govern()` for the audit/replay/conflict trail but returns the first call's
+  cached result instead of invoking the tool again, so a replayed wire transfer
+  cannot move money twice. A denial or a tool failure is left un-cached so a retry
+  re-runs. A *direct* `govern`/`govern_sync` caller (no proxy) gets the same
+  protection via `Decision.replayed`: it is `True` when the decision was served
+  from the ledger, so the caller gates its own side effect on `allowed and not
+  replayed`. The keyed path also fingerprints inside the fail-closed boundary — a
+  payload that cannot be serialised is an audited `GovernanceError`, never a raw
+  exception that skips the trail. v0.1 ledger/effect-cache are
+  in-memory/process-local (bounding tracked in `TODOS.md`).
+- **Per-call decision budget** (S7, `core.py`) — `ZemtikGovern(timeout=...)` bounds
+  identity + policy with `asyncio.wait_for`; a timeout is a system fault that flows
+  through the existing fail-closed path (audited, then denied — the tool never
+  runs), so a hung engine can never stall the voice path or become an implicit allow.
+- **Adversarial matrix + pressure-test gate** (S7, `tests/`) —
+  `test_adversarial.py` pins five break-it scenarios (deep-nested payload
+  immutability, concurrent duplicate idempotency keys, policy/identity timeouts,
+  Merkle verify after crash-recovery from the file sink); `test_pressure.py` drives
+  one governor through a sync `govern_sync` fintech write and an async sub-100ms
+  voice turn, confirming the async-first Protocols serve both with no `protocols.py`
+  change.
 - **Operational modes + kill-switch** (S4, `core.py`) — `ZemtikGovern` takes a
   `mode`: `shadow` records a would-be denial but does NOT enforce it (the tool
   still runs, surfacing false-denies on live traffic), while `enforce`/`strict`
@@ -69,9 +109,12 @@ fallback-protected audit trail (S5).
   dev lockfile (`requirements-dev.lock`, covering pytest/ruff), ruff as a hard
   lint gate, AGT conformance + e2e tests, and a version-pinned `pip-audit` OSV
   gate against `requirements.lock`.
-- **Tests** — 75 passing across boundary, conformance, context, errors,
-  protocols, policy, core, e2e, config, registry, proxy, modes, and audit
-  (incl. fallback redaction + symlink-refusal regressions).
+- **Tests** — 96 passing across boundary, conformance, context, errors,
+  protocols, policy, core, e2e, config, registry, proxy, modes, audit
+  (incl. fallback redaction + symlink-refusal regressions), identity, the
+  adversarial matrix, and the pressure-test gate — now covering effect-idempotent
+  proxy replay (sequential + concurrent + cancellation), the direct-caller replay
+  signal, deny-replay, un-cached system errors, and fingerprint fail-closed.
 
 ### Notes / deferred
 

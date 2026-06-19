@@ -12,6 +12,114 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   context and `policy_id`/`policy_version` from the matched policy document, or
   drop the fields until wired. Surfaced by review (maintainability + red-team).
 
+## Idempotency / core (S7 hardening)
+
+- **Bound the idempotency ledger**
+  **Priority:** P1
+  `core.py` `_idem_ledger` is an unbounded, process-local `dict` keyed on the
+  caller-supplied `idempotency_key`. Normal unique-key traffic grows it forever
+  (memory leak); a malicious caller streaming unique keys is a DoS. Add an
+  LRU/TTL bound (window-matched, e.g. 24h). Evicting a still-replayable key only
+  costs a deterministic re-evaluation, which is safe. Surfaced by Claude + Codex
+  adversarial review.
+
+- **Per-key idempotency locking**
+  **Priority:** P2
+  `_idem_lock` is one global `asyncio.Lock` held across identity + policy + audit,
+  so every keyed call serialises against every other keyed call (head-of-line
+  blocking on the latency-sensitive path). Lock per key (or an in-flight
+  `dict[str, Future]`) so distinct keys evaluate concurrently and only true
+  duplicates wait. Surfaced by adversarial review.
+
+- **Decision budget is not a hard fail-closed boundary**
+  **Priority:** P2
+  `asyncio.wait_for` cancels the engine coroutine on timeout, but an engine that
+  swallows `CancelledError` can still return a value (verified: a callee catching
+  cancellation returned an allow after the budget). Document the cancellation-
+  safety contract for `identify`/`evaluate`, and/or treat a budget breach as a
+  deny regardless of the coroutine's eventual return. Also: the budget wraps each
+  await separately (identity, then policy) and excludes lock-wait + audit, so
+  total wall-clock can exceed `timeout`. Surfaced by adversarial review.
+
+- **Replay pins the first decision across mode/killswitch changes**
+  **Priority:** P3
+  A ledgered decision replays under the live `mode`/killswitch, mixing a cached
+  allow/deny with current enforcement — a killswitch engaged after a key is
+  ledgered cannot revert that key. Either key the ledger on
+  `(idempotency_key, mode, killswitch_state)` or document + test the intentional
+  first-decision pinning and re-enforce under the stored mode. Surfaced by
+  adversarial review.
+
+## Idempotency / core (S6–S7 ship review)
+
+- **Fingerprint rejects ambiguous payloads instead of coercing**
+  **Priority:** P2
+  `_request_fingerprint` serialises with `json.dumps(..., default=str)`. Two
+  distinct non-JSON-native payload values that stringify identically collapse to
+  the same SHA-256, so a key reused with the same action+subject but a different
+  custom-object payload that stringifies the same is replayed as a duplicate
+  rather than detected as a conflict. The *raw-exception* half (an
+  un-serialisable payload escaping the fail-closed boundary) is now fixed —
+  fingerprint failures audit + raise `GovernanceError`. The remaining work is the
+  collision: drop `default=str` for a strict encoder, or validate payloads as
+  JSON-native at `GovernanceContext` construction. Surfaced by security + red-team
+  + Codex review.
+
+- **Wire the decision budget through config/registry**
+  **Priority:** P2
+  `ZemtikGovern(timeout=...)` exists but `GovernanceConfig`/`GovernanceRegistry`
+  never set it, so the default is `None` (no bound) for every config-built
+  governor. Combined with the single global `_idem_lock`, one hung keyed request
+  can stall all keyed governance in-process. Thread a `decision_budget` config
+  field → registry → core so deployments actually get the voice-path bound.
+  Surfaced by Codex review.
+
+- **Cancellation is not audited**
+  **Priority:** P3
+  `_evaluate_and_audit` catches `except Exception`, which does NOT catch
+  `asyncio.CancelledError` (a `BaseException`). A client that cancels mid-identity
+  or mid-policy on the direct or non-keyed proxy path leaves no audit entry for
+  the attempted governed action — fail-closed (the tool never runs) but a gap in
+  the "every outcome audited" contract. Either audit the cancellation or document
+  it as an explicitly un-audited abort. Surfaced by Codex review.
+
+- **Fingerprint trust anchor should be the resolved DID, not the raw subject**
+  **Priority:** P3
+  `_request_fingerprint` binds the key to `ctx.subject` (raw, unverified) because
+  fingerprinting runs before identity resolution. Benign while `StaticIdentity`
+  is an exact identity map; the moment a real provider canonicalises (case-fold,
+  alias→DID) two subjects mapping to one DID become a false conflict, and casing
+  variants could evade conflict detection. Fingerprint over the resolved DID
+  (identity-before-fingerprint) or document the exact-map assumption. Surfaced by
+  red-team review.
+
+- **Replay audit entry is orphaned from the returned decision**
+  **Priority:** P3
+  The replay path writes a fresh `outcome="replay"` entry but discards its event
+  id and returns the cached decision, whose `audit_event_id` still points at the
+  original entry. A forensic reader sees a replay row with no link to the decision
+  the caller received. Stamp the replay decision with the replay entry's id.
+  Surfaced by red-team review.
+
+- **Conflict-path audit failure masks GovernanceError**
+  **Priority:** P3
+  In the idempotency-conflict branch, if `audit.write()` itself raises (sink
+  down), the raw sink exception propagates instead of the intended
+  `GovernanceError` — still fail-closed, but callers distinguishing governance
+  faults from infra faults mis-route it. Either wrap it like `_evaluate_and_audit`
+  or accept the codebase-wide pattern that audit failures propagate (the
+  fallback-protected sink already converts to `GovernanceError`). Surfaced by
+  red-team review.
+
+- **Fingerprint hot-path allocation on the voice path**
+  **Priority:** P4
+  `_request_fingerprint` calls `ctx.to_dict()` to read only `["payload"]`, but
+  `to_dict()` eagerly thaws BOTH payload and `extra` (the thawed `extra` is
+  discarded). On every keyed call on the latency-sensitive voice path this is a
+  wasted deep-copy. Thaw payload directly. Also: the full `json.dumps` + sha256
+  runs even on the replay-hit case; cache the fingerprint on the frozen context if
+  voice payloads grow. Surfaced by performance review.
+
 ## CI / supply chain
 
 - **Pin GitHub Actions to commit SHAs**
@@ -45,3 +153,15 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   (0600 file + stderr, `payload_sha256`, never raw payload) failing closed as
   `GovernanceError`; durable HMAC-signed `FileAuditSink` wired from a file-path
   `audit_sink` + `$ZEMTIK_AUDIT_SECRET`. **Completed:** Unreleased (2026-06-18)
+- **S6: Identity — StaticIdentity stub** — `identity/` package; `StaticIdentity`
+  resolves a subject to a typed `AgentRef` (`did:mesh:<subject>`, minted behind the
+  boundary), `IdentityProvider.identify` returns it, core stamps `agent_did`
+  identity-first; Protocol is the only public seam. **Completed:** Unreleased
+  (2026-06-18)
+- **S7: Adversarial matrix + pressure-test gate** — five-scenario
+  `test_adversarial.py` (payload immutability, concurrent idempotency-key replay,
+  policy/identity timeouts fail-closed, Merkle verify after crash-recovery) plus
+  `test_pressure.py` driving one governor through a sync fintech write and an async
+  sub-100ms voice turn; added an idempotency replay guard and a per-call decision
+  budget to `core.py`, no `protocols.py` change. **Completed:** Unreleased
+  (2026-06-18)

@@ -48,7 +48,7 @@ def main() -> int:
 
     # 3. Audit concern (agentmesh).
     print("\n[3] Audit   — agentmesh.governance.audit.AuditLog (Merkle-chained)")
-    did = boundary.mint_did("loopay-agent-1")
+    did = boundary.mint_did("agent-1")
     log = boundary.audit_log()
     entry = log.log(event_type="tool_invoked", agent_did=did, action="tool.run", outcome="success")
     # Merkle proof needs >=2 leaves (a single-leaf chain has no sibling path).
@@ -61,7 +61,7 @@ def main() -> int:
 
     # 4. Identity concern (agentmesh) + the identity->audit compat point.
     print("\n[4] Identity — agentmesh.identity.AgentDID")
-    print(f"    mint_did('loopay-agent-1') -> {did!r}")
+    print(f"    mint_did('agent-1') -> {did!r}")
     print("    AuditEntry.agent_did is required -> identity MUST run before audit")
     print(f"    stamped entry.agent_did = {entry.agent_did!r}")
     assert entry.agent_did == did
