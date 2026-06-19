@@ -1,0 +1,47 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "zemtik-govern"
+version = "0.1.0.dev0"
+description = "Security-first modular Python wrapper around Microsoft AGT"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+authors = [{ name = "David Carvajal", email = "david@zemtik.com" }]
+dependencies = [
+    # AGT boundary — pinned exactly; assert_pins() enforces these at runtime.
+    "agent-os-kernel==3.7.0",
+    "agentmesh-platform==3.7.0",
+    # Config parsing (GovernanceConfig.load).
+    "pyyaml==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zemtik_govern"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests", "spike"]
+
+[tool.ruff.lint]
+# pyflakes (F), pycodestyle (E/W), isort (I), pyupgrade (UP), bugbear (B).
+select = ["E", "W", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests and conformance reach private AGT members and use long descriptive names.
+"tests/*" = ["E501"]
+"spike/*" = ["E501"]

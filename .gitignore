@@ -1,2 +1,9 @@
 # Added by code-review-graph
 .code-review-graph/
+.claude
+.agents
+.venv/
+__pycache__/
+.coverage
+.pytest_cache/
+.ruff_cache/

@@ -1,0 +1,65 @@
+name: ci
+
+# Runs from day one. The AGT-conformance job is the pinning-bet early warning
+# (Premise 2): green CI means the pinned AGT still fits the wrapper. The audit
+# job is the supply-chain gate (E7) — a known CVE in a transitive dep fails the
+# build, it does not warn.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Create venv
+        run: uv venv
+
+      # Hash-pinned install: the dev lockfile carries --hash for every dep
+      # (runtime + test tooling: pytest, pytest-asyncio, ruff), so a tampered or
+      # substituted artifact fails verification at install time. The test job
+      # uses the dev lock so lint/test run against a fully verified environment.
+      - name: Install pinned dependencies (runtime + dev)
+        run: uv pip install --require-hashes -r requirements-dev.lock
+
+      - name: Install the package (no deps — already pinned above)
+        run: uv pip install --no-deps -e ".[dev]"
+
+      # Run the venv binaries directly (not `uv run`, which would re-sync and
+      # could pull unpinned tooling). The env was populated by the hashed install.
+      - name: Lint
+        run: .venv/bin/ruff check .  # gates the build; config in pyproject [tool.ruff]
+
+      - name: Test (unit + AGT conformance + e2e)
+        run: .venv/bin/pytest -q
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      # OSV / pip-audit gate: scan the resolved lockfile for known
+      # vulnerabilities. Non-zero exit fails the build (no `|| true`). The audit
+      # tool itself is version-pinned so the supply-chain gate is reproducible.
+      - name: Audit dependencies (pip-audit)
+        run: |
+          uvx pip-audit@2.10.1 --require-hashes --requirement requirements.lock --strict
