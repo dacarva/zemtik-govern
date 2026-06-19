@@ -24,6 +24,7 @@ class GovernanceRegistry:
     """Collects the three seams, then builds the orchestration core."""
 
     def __init__(self) -> None:
+        """Start with all three seams empty. Call ``register_*`` then ``build()``."""
         self._identity: IdentityProvider | None = None
         self._policy: PolicyEngine | None = None
         self._audit: AuditSink | None = None
@@ -37,18 +38,26 @@ class GovernanceRegistry:
         return self
 
     def register_identity(self, impl: IdentityProvider) -> GovernanceRegistry:
+        """Register the :class:`~zemtik_govern.protocols.IdentityProvider` seam."""
         self._identity = impl
         return self
 
     def register_policy(self, impl: PolicyEngine) -> GovernanceRegistry:
+        """Register the :class:`~zemtik_govern.protocols.PolicyEngine` seam."""
         self._policy = impl
         return self
 
     def register_audit(self, impl: AuditSink) -> GovernanceRegistry:
+        """Register the :class:`~zemtik_govern.protocols.AuditSink` seam."""
         self._audit = impl
         return self
 
     def build(self) -> ZemtikGovern:
+        """Return a fully-wired :class:`ZemtikGovern`.
+
+        Raises :class:`GovernanceNotConfigured` if any seam is missing — a
+        half-wired core would silently skip a concern at request time.
+        """
         missing = [
             name
             for name, seam in (

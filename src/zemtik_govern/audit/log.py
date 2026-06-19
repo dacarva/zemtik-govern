@@ -35,6 +35,13 @@ class AgentMeshAudit:
         self._fallback_path = fallback_path
 
     async def write(self, entry: AuditEntry) -> str:
+        """Write an audit entry to the Merkle-chained log and return its entry ID.
+
+        Thaws the frozen payload before passing to agentmesh (which hashes with
+        ``json.dumps`` and cannot handle ``MappingProxyType``). On primary-sink
+        failure: routes to the redacted fallback channel then raises
+        :class:`GovernanceError` — the tool is blocked even when audit cannot.
+        """
         try:
             # this adapter is the one place that knows agentmesh's kwarg names
             written = self._log.log(

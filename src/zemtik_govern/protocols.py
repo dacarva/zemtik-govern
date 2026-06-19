@@ -81,6 +81,13 @@ class AuditEntry:
         outcome: str | None = None,
         mode: str | None = None,
     ) -> AuditEntry:
+        """Map a governance decision into the audit vocabulary.
+
+        Owns the decision→audit-entry translation so the orchestrator stays pure
+        orchestration. ``outcome`` defaults to ``"success"``/``"denied"`` for
+        ordinary allow/deny results; callers pass an explicit value for special
+        cases (``"error"``, ``"replay"``).
+        """
         if outcome is None:
             outcome = "success" if decision.allowed else "denied"
         return cls(

@@ -29,6 +29,12 @@ class AgentOsPolicy:
         self._evaluator = boundary._policy_evaluator(policies=policies, root_dir=root_dir)
 
     async def evaluate(self, ctx: GovernanceContext) -> Decision:
+        """Evaluate the context and enforce deny-by-default.
+
+        Calls AGT's evaluator, then overrides the ``matched_rule is None`` case
+        (AGT's fail-open) to a ``policy`` denial. When a rule *does* match, AGT's
+        own verdict (allow or deny) is trusted and wrapped in a :class:`Decision`.
+        """
         raw = self._evaluator.evaluate(ctx.to_dict())
 
         # The moat: AGT fails OPEN on no-match. Override to deny-by-default.

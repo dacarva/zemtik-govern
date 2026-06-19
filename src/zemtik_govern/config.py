@@ -57,6 +57,11 @@ class GovernanceConfig:
     audit_sink: str | None = None
 
     def __post_init__(self) -> None:
+        """Validate the config, raising :class:`GovernanceNotConfigured` on any insecure shape.
+
+        All validation runs at parse time so an insecure config never reaches the
+        orchestrator. Normalises ``rules`` to an immutable tuple.
+        """
         # Normalise rules to an immutable tuple regardless of how they arrived.
         object.__setattr__(self, "rules", tuple(self.rules))
         if self.mode not in VALID_MODES:
@@ -74,6 +79,7 @@ class GovernanceConfig:
             self._validate_policy_source()
 
     def _validate_rule_shapes(self) -> None:
+        """Ensure every rule is a Mapping; a non-mapping rule is a config error, not runtime."""
         for i, rule in enumerate(self.rules):
             if not isinstance(rule, Mapping):
                 raise GovernanceNotConfigured(
@@ -81,6 +87,7 @@ class GovernanceConfig:
                 )
 
     def _validate_policy_source(self) -> None:
+        """Raise if an enforcing mode has no usable policy source (no rules AND no policy_dir)."""
         if not self.rules and self.policy_dir is None:
             raise GovernanceNotConfigured(
                 f"{self.mode} mode requires policy rules or a policy_dir; got zero rules"
@@ -91,6 +98,7 @@ class GovernanceConfig:
             )
 
     def _policy_dir_has_files(self) -> bool:
+        """Return True if ``policy_dir`` exists and contains at least one file."""
         directory = Path(self.policy_dir) if self.policy_dir else None
         if directory is None or not directory.is_dir():
             return False
@@ -98,6 +106,12 @@ class GovernanceConfig:
 
     @classmethod
     def from_mapping(cls, data: Mapping[str, Any]) -> GovernanceConfig:
+        """Build a config from a parsed dict (e.g. from ``yaml.safe_load``).
+
+        Coerces and validates field types before handing to ``__post_init__``,
+        so callers get a :class:`GovernanceNotConfigured` with a clear field name
+        rather than a raw ``TypeError`` deep in the dataclass.
+        """
         if not isinstance(data, Mapping):
             raise GovernanceNotConfigured("config root must be a mapping")
         rules = data.get("rules") or []

@@ -27,4 +27,5 @@ class StaticIdentity:
         self._boundary = boundary
 
     async def identify(self, subject: str) -> AgentRef:
+        """Mint a deterministic ``did:mesh:<subject>`` DID and return it as an :class:`AgentRef`."""
         return AgentRef(did=self._boundary.mint_did(subject))
