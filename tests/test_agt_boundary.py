@@ -55,5 +55,5 @@ def test_boundary_exposes_audit_log_that_verifies():
 def test_boundary_mints_did_string():
     """Identity concern: mint the did:mesh string that audit.log stamps."""
     boundary = AGTBoundary()
-    did = boundary.mint_did("loopay-agent-1")
-    assert did == "did:mesh:loopay-agent-1"
+    did = boundary.mint_did("agent-1")
+    assert did == "did:mesh:agent-1"

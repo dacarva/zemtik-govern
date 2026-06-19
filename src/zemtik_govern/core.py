@@ -4,14 +4,16 @@ Order is fixed (A2): identity → policy → audit. Identity first because polic
 key on the subject and every audit entry is stamped with the DID. Audit last
 because it records the final decision — EVERY outcome, including fail-closed
 denials. Any unexpected exception is wrapped as :class:`GovernanceError`, audited
-as a denial, and re-raised — the tool never runs (no ``scheduler.py:29-30``
-fall-through).
+as a denial, and re-raised — the tool never runs (no ungoverned fall-through to
+the tool on a governance fault).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import json
 from collections.abc import Callable
 from dataclasses import replace
 from typing import Any
@@ -29,6 +31,30 @@ from .protocols import (
 # Stamped on the audit entry when identity itself fails — we still record the
 # blocked outcome, we just have no resolved DID to attribute it to.
 _UNIDENTIFIED_DID = "did:mesh:unidentified"
+
+# Recorded when an idempotency key is reused for a different request. A system
+# denial: the request was never evaluated, it was rejected as a key conflict.
+_IDEM_CONFLICT = Decision(
+    allowed=False,
+    action="error",
+    matched_rule=None,
+    reason="idempotency key reused for a different request",
+    denial_kind="system",
+)
+
+
+def _request_fingerprint(ctx: GovernanceContext) -> str:
+    """A stable hash of the part of the request policy actually decides on —
+    action, subject, payload. Binds an idempotency key to ONE request so a key
+    reused for a different action/subject/payload is detected as a conflict.
+    ``ts`` and ``extra`` are excluded: a retried request keeps its identity even
+    if the clock or out-of-band metadata moved."""
+    canonical = json.dumps(
+        {"action": ctx.action, "subject": ctx.subject, "payload": ctx.to_dict()["payload"]},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 # Shadow mode observes without enforcing; every other mode enforces (raises on a
 # deny). Kept as a set so a typo in a mode string enforces by default — the safe
@@ -70,6 +96,7 @@ class ZemtikGovern:
         mode: str = "enforce",
         fallback: PolicyEngine | None = None,
         killswitch: Callable[[], bool] | None = None,
+        timeout: float | None = None,
     ) -> None:
         self._identity = identity
         self._policy = policy
@@ -77,17 +104,112 @@ class ZemtikGovern:
         self._mode = mode
         self._fallback = fallback
         self._killswitch = killswitch
+        # Per-call decision budget (seconds) for identity + policy. The latency-
+        # sensitive voice path needs a bound; a hung engine must never stall the
+        # caller indefinitely. A timeout is a system fault, so it flows through the
+        # same fail-closed path as any other engine error: audited, then denied.
+        self._timeout = timeout
+        # Idempotency replay guard. A duplicate idempotency_key must resolve to the
+        # SAME decision it did the first time — a replayed fintech write is not a
+        # new request. The lock serialises same-key calls so two concurrent
+        # submissions can't both slip through as fresh evaluations. v0.1 keeps the
+        # ledger in memory (process-local, unbounded); a durable store plugs in
+        # here in v0.2 without changing the govern() contract.
+        self._idem_lock = asyncio.Lock()
+        # key -> (request fingerprint, did, decision). The fingerprint binds the
+        # key to the ONE request it was minted for: an idempotency key identifies a
+        # request, it is not a bearer token that replays a prior allow onto any
+        # action. A key reused with a different action/subject/payload is a conflict,
+        # not a duplicate, and fails closed (below) rather than bypassing policy.
+        self._idem_ledger: dict[str, tuple[str, str, Decision]] = {}
 
     async def govern(self, ctx: GovernanceContext) -> Decision:
-        # Identity AND policy run inside the fail-closed boundary: a fault in
-        # EITHER is a system denial, audited then re-raised. Identity is no
-        # exception — an unaudited, unwrapped identity failure would be a hole in
-        # the "every outcome audited" contract. If identity is what failed we have
-        # no DID, so the audit entry is stamped with the reserved unidentified DID.
+        key = ctx.idempotency_key
+        if key is None:
+            _, decision = await self._evaluate_and_audit(ctx)
+            return self._enforce(decision)
+
+        # Idempotent path: serialise on the key so a concurrent duplicate is a
+        # deterministic replay, never silently evaluated as a brand-new request.
+        # Fingerprint INSIDE the fail-closed boundary: a payload we cannot
+        # canonically serialise cannot be safely matched against the ledger, so a
+        # fingerprint failure is a system denial (audited, then GovernanceError) —
+        # never a raw exception that skips the trail.
+        try:
+            fingerprint = _request_fingerprint(ctx)
+        except Exception as exc:
+            denial = Decision(
+                allowed=False,
+                action="error",
+                matched_rule=None,
+                reason=f"idempotency fingerprint failed: {exc}",
+                denial_kind="system",
+            )
+            await self._audit.write(
+                AuditEntry.from_decision(
+                    ctx, _UNIDENTIFIED_DID, denial, outcome="error", mode=self._mode
+                )
+            )
+            raise GovernanceError(
+                "idempotency fingerprint failed; tool blocked"
+            ) from exc
+        async with self._idem_lock:
+            if key in self._idem_ledger:
+                seen_fp, did, decision = self._idem_ledger[key]
+                if seen_fp != fingerprint:
+                    # Same key, different request: a conflict, not a duplicate.
+                    # Replaying the prior decision here would let an ungoverned
+                    # action ride a recycled key past policy. Fail closed: audit the
+                    # conflict and raise — the tool never runs, policy is never
+                    # bypassed. The conflicting request was never identity-resolved,
+                    # so it is NOT attributable to the prior key holder: stamp the
+                    # reserved unidentified DID, never the cached (first-caller) DID.
+                    await self._audit.write(
+                        AuditEntry.from_decision(
+                            ctx,
+                            _UNIDENTIFIED_DID,
+                            _IDEM_CONFLICT,
+                            outcome="error",
+                            mode=self._mode,
+                        )
+                    )
+                    raise GovernanceError(
+                        "idempotency key reused for a different request; tool blocked"
+                    )
+                # Genuine duplicate: record the REPLAY (not a second success/denied)
+                # so the trail shows it was recognised, then re-apply the original
+                # enforcement so the caller sees the same outcome. Flag the returned
+                # decision as a replay so a DIRECT govern/govern_sync caller can skip
+                # re-running its own side effect (the proxy dedupes effects itself).
+                await self._audit.write(
+                    AuditEntry.from_decision(
+                        ctx, did, decision, outcome="replay", mode=self._mode
+                    )
+                )
+                return self._enforce(replace(decision, replayed=True))
+            did, decision = await self._evaluate_and_audit(ctx)
+            # Cache only a completed evaluation; a fail-closed system error raises
+            # out of _evaluate_and_audit and is left un-cached so a retry re-runs.
+            self._idem_ledger[key] = (fingerprint, did, decision)
+            return self._enforce(decision)
+
+    async def _evaluate_and_audit(
+        self, ctx: GovernanceContext
+    ) -> tuple[str, Decision]:
+        """Identity → policy → audit, inside the fail-closed boundary.
+
+        A fault in EITHER identity or policy is a system denial, audited then
+        re-raised as :class:`GovernanceError`. Identity is no exception — an
+        unaudited, unwrapped identity failure would be a hole in the "every outcome
+        audited" contract. If identity is what failed we have no DID, so the audit
+        entry is stamped with the reserved unidentified DID. Returns
+        ``(did, decision)`` with the decision enriched with its audit id; does NOT
+        enforce (the caller decides whether a deny raises).
+        """
         did = _UNIDENTIFIED_DID
         try:
-            did = await self._identity.identify(ctx.subject)
-            decision = await self._select_engine().evaluate(ctx)
+            did = (await self._with_budget(self._identity.identify(ctx.subject))).did
+            decision = await self._with_budget(self._select_engine().evaluate(ctx))
         except Exception as exc:
             # Fail-closed: the tool never runs; the original exception is preserved.
             denial = Decision(
@@ -107,9 +229,19 @@ class ZemtikGovern:
         event_id = await self._audit.write(
             AuditEntry.from_decision(ctx, did, decision, mode=self._mode)
         )
-        decision = replace(decision, audit_event_id=event_id)
-        # Shadow mode observes only: the denial is recorded above but NOT enforced,
-        # so the caller's tool still runs. Every other mode enforces the deny.
+        return did, replace(decision, audit_event_id=event_id)
+
+    async def _with_budget(self, coro):
+        """Await *coro* under the configured decision budget. With no budget, a
+        plain await; with one, ``asyncio.wait_for`` — whose ``TimeoutError`` is an
+        ordinary exception caught by the fail-closed boundary above."""
+        if self._timeout is None:
+            return await coro
+        return await asyncio.wait_for(coro, self._timeout)
+
+    def _enforce(self, decision: Decision) -> Decision:
+        # Shadow mode observes only: the denial is recorded but NOT enforced, so the
+        # caller's tool still runs. Every other mode enforces the deny.
         if not decision.allowed and self._mode != _SHADOW:
             raise GovernanceDenied(decision)
         return decision
@@ -174,6 +306,18 @@ class _GovernedProxy:
     is never invoked. On allow, the call goes through and its result is returned
     (awaited if the wrapped callable is async).
 
+    Effect-idempotency: when the context carries an ``idempotency_key``, the proxy
+    dedupes the *side effect*, not just the governance decision. The first keyed
+    call runs the tool once and caches its result; a duplicate (sequential OR
+    concurrent) re-runs ``govern()`` — so the replay is still audited and a key
+    reused for a different request still fails closed — but returns the cached
+    result instead of invoking the tool again. The in-flight result is held as a
+    future, so a second submission that arrives before the first completes awaits
+    the same execution rather than starting its own. A denial or a tool failure is
+    left un-cached, so a later retry re-evaluates and re-runs (the cache holds only
+    successful effects). v0.1 keeps this cache in memory/process-local and
+    unbounded; bounding rides the same ledger-bounding work tracked in ``TODOS.md``.
+
     Trust boundary (v0.1): the proxy governs the *public* call path. The wrapped
     callable is held on a single-underscore private (``_fn``); reaching past it is
     the same out-of-band move as reaching ``AGTBoundary._policy_evaluator`` and is
@@ -196,6 +340,11 @@ class _GovernedProxy:
         self._action = action
         self._subject = subject
         self._context_factory = context_factory
+        # idempotency_key -> Future[result]. Dedupes the EFFECT: a keyed duplicate
+        # returns this cached/in-flight result instead of re-invoking the tool. Only
+        # successful effects are cached (failures/denies are popped), so a retry of a
+        # transient fault re-runs. Process-local + unbounded in v0.1 (see TODOS.md).
+        self._results: dict[str, asyncio.Future[Any]] = {}
 
     def _build_ctx(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -218,7 +367,60 @@ class _GovernedProxy:
 
     async def __call__(self, *args: Any, **kwargs: Any) -> Any:
         ctx = self._build_ctx(args, kwargs)
+        key = ctx.idempotency_key
+        if key is None:
+            await self._gov.govern(ctx)  # raises on deny -> the tool never runs
+            return await self._invoke(args, kwargs)
+
+        inflight = self._results.get(key)
+        if inflight is not None:
+            # A prior call with this key is in flight or done. Run govern() so the
+            # duplicate is audited as a replay (and a key reused for a DIFFERENT
+            # request still fails closed before we touch the cached effect), then
+            # return the SAME result without re-invoking the tool. ``shield`` so this
+            # caller's cancellation can't cancel the shared execution.
+            await self._gov.govern(ctx)
+            return await asyncio.shield(inflight)
+
+        # First call for this key. Create the effect task synchronously so the slot
+        # is reserved BEFORE any await — a concurrent duplicate then sees it and
+        # waits on the same execution instead of racing into a second tool call.
+        task: asyncio.Future[Any] = asyncio.ensure_future(
+            self._effect(ctx, args, kwargs)
+        )
+        self._results[key] = task
+        task.add_done_callback(self._evict_failed_effect(key))
+        # ``shield`` so this caller's cancellation can't cancel the shared effect;
+        # the task runs to completion once and the done-callback (not this caller)
+        # owns slot cleanup.
+        return await asyncio.shield(task)
+
+    def _evict_failed_effect(
+        self, key: str
+    ) -> Callable[[asyncio.Future[Any]], None]:
+        """Done-callback that drops a failed effect from the cache so a later retry
+        re-runs. Tied to the TASK's lifetime, not any caller's: if the first caller
+        is cancelled while the effect is still running, this still fires when the
+        effect finishes — a cancelled caller can't leave a failed effect cached.
+        Reading ``exception()`` here also retrieves it, so an orphaned failure does
+        not surface as a stray 'task exception was never retrieved'."""
+
+        def _evict(task: asyncio.Future[Any]) -> None:
+            # Only a SUCCESSFUL effect stays cached; a cancel or an exception evicts.
+            if task.cancelled() or task.exception() is not None:
+                # Guard against a same-key task having already replaced this slot.
+                if self._results.get(key) is task:
+                    del self._results[key]
+
+        return _evict
+
+    async def _effect(
+        self, ctx: GovernanceContext, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> Any:
         await self._gov.govern(ctx)  # raises on deny -> the tool never runs
+        return await self._invoke(args, kwargs)
+
+    async def _invoke(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
         result = self._fn(*args, **kwargs)
         if inspect.isawaitable(result):
             return await result

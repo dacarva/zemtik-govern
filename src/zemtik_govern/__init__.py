@@ -16,7 +16,7 @@ from .config import GovernanceConfig
 from .context import GovernanceContext
 from .core import Killswitch, ZemtikGovern
 from .errors import GovernanceDenied, GovernanceError, GovernanceNotConfigured
-from .identity import StaticIdentity
+from .identity import AgentRef, StaticIdentity
 from .policy import AgentOsPolicy
 from .protocols import (
     AuditEntry,
@@ -32,6 +32,7 @@ __all__ = [
     "AGTBoundary",
     "AGTVersionError",
     "AgentMeshAudit",
+    "AgentRef",
     "AgentOsPolicy",
     "AuditEntry",
     "AuditSink",

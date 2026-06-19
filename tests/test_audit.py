@@ -33,7 +33,7 @@ def _frozen_ctx():
     # nested dict -> deep-frozen into nested MappingProxyType by GovernanceContext
     return GovernanceContext(
         action="tool.run",
-        subject="loopay-1",
+        subject="agent-1",
         payload={"amount": 5, "meta": {"currency": "USD"}},
         idempotency_key="idem-1",
         ts="2026-06-18T00:00:00Z",
@@ -47,8 +47,8 @@ async def test_adapter_converts_frozen_payload_and_audit_verifies():
     audit = AgentMeshAudit(AGTBoundary())
     ctx = _frozen_ctx()
     # write twice: a Merkle proof needs a chain (>=2 leaves)
-    first = await audit.write(AuditEntry.from_decision(ctx, "did:mesh:loopay-1", _ALLOW))
-    await audit.write(AuditEntry.from_decision(ctx, "did:mesh:loopay-1", _ALLOW))
+    first = await audit.write(AuditEntry.from_decision(ctx, "did:mesh:agent-1", _ALLOW))
+    await audit.write(AuditEntry.from_decision(ctx, "did:mesh:agent-1", _ALLOW))
     assert first
     ok, err = audit.verify_integrity()
     assert ok, err
@@ -93,7 +93,7 @@ async def test_fallback_redacts_payload(tmp_path):
     audit = AgentMeshAudit(AGTBoundary(), sink=_BrokenSink(), fallback_path=fb)
     ctx = _frozen_ctx()  # payload {amount: 5, meta: {currency: USD}}
     with pytest.raises(GovernanceError):
-        await audit.write(AuditEntry.from_decision(ctx, "did:mesh:loopay-1", _ALLOW))
+        await audit.write(AuditEntry.from_decision(ctx, "did:mesh:agent-1", _ALLOW))
 
     body = fb.read_text(encoding="utf-8")
     assert "payload_sha256" in body
