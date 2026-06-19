@@ -109,6 +109,10 @@ class GovernanceRegistry:
 
     # The HMAC signing key for a file audit sink is read from the environment,
     # never the config file — a signing secret does not belong in checked-in YAML.
+    # Operators must set this env var when ``audit_sink`` is a file path; the
+    # canonical reference for usage and security notes is ``docs/operations.md``.
+    # This constant is intentionally private: external code should reference the
+    # documented env var name (``"ZEMTIK_AUDIT_SECRET"``), not this symbol.
     _AUDIT_SECRET_ENV = "ZEMTIK_AUDIT_SECRET"
 
     @staticmethod

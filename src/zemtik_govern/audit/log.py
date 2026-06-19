@@ -73,5 +73,13 @@ class AgentMeshAudit:
         return self._log.verify_integrity()
 
     def get_proof(self, entry_id: str):
-        """Delegates to agentmesh — a Merkle proof for a written entry."""
+        """Delegates to agentmesh — a Merkle proof for a written entry.
+
+        **Precondition**: the log must contain at least **two** entries before a
+        sibling path can be constructed.  Calling this on a log with fewer than
+        two entries will raise an error from agentmesh (the exact type depends on
+        the agentmesh version; treat any exception from this call as a
+        precondition violation).  Ensure entries have been written before
+        requesting a proof (e.g. at least two successful ``govern()`` calls).
+        """
         return self._log.get_proof(entry_id)

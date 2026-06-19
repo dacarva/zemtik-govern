@@ -6,6 +6,25 @@ via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 
 ## [Unreleased]
 
+### Documentation sprint (2026-06-19)
+
+Comprehensive documentation added in this sprint:
+
+- **`docs/architecture.md`** — three-seam design diagram, idempotency model,
+  fail-closed guarantee, deny-by-default moat, AGT boundary, startup validation.
+- **`docs/integration-guide.md`** — quickstart, all usage patterns (async,
+  sync, proxy, context factory, shadow, kill-switch, budget), custom seam
+  examples, and error handling reference.
+- **`docs/configuration-reference.md`** — full YAML field reference, mode
+  matrix, env vars (`ZEMTIK_AUDIT_SECRET`, `ZEMTIK_AUDIT_FALLBACK`), startup
+  validation rules, and runtime parameters.
+- **`docs/operations.md`** — deployment checklist, durable audit configuration,
+  integrity verification, emergency fallback channel, kill-switch wiring, shadow
+  rollout procedure, monitoring signals, and known operational limits.
+- **`docs/api-reference.md`** — full public API: `ZemtikGovern`, `Killswitch`,
+  `GovernanceContext`, `Decision`, `AuditEntry`, protocols, config, registry,
+  errors, and audit.
+
 S1–S7 of the governance wrapper: the AGT boundary, the M0 skeleton, and the
 fail-closed policy core, plus config/registry/proxy wiring and a hardened CI
 supply-chain gate — now with operational safety modes (S4), the durable,
