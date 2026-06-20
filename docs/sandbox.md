@@ -16,6 +16,7 @@ uv pip install -e ".[dev]"
 |------|----------------|------------|
 | `qa_demo.py` | Three-seam pipeline scenarios S1–S10 (allow, deny, fail-closed, idempotency) | none |
 | `auditor.py` | Durable audit trail: verify Merkle/HMAC, extract inclusion proofs, detect tampering | none |
+| `dogfood_cutover.py` | Staged cutover of a fintech agent: shadow → enforce, kill-switch revert, audit integrity | none |
 | `e2e_openai_governed.py` | A real `gpt-5.4-nano` agent governed through `GovernedToolNode` against a mock bank DB | `[langchain]`, `[openai]`, OpenAI key |
 
 ## qa_demo.py — three-seam scenarios
@@ -36,6 +37,32 @@ inclusion proof, then mutates one byte to show the chain breaks.
 ```bash
 ZEMTIK_AUDIT_SECRET=audit-secret python sandbox/auditor.py
 ```
+
+## dogfood_cutover.py — staged shadow → enforce cutover
+
+A simulated fintech agent with seven `govern()` call sites (four reads, three
+privileged money-path writes) cut over onto the substrate the way a careful
+rollout actually does it. Every call site assembles its context through one
+factory (`make_context`) — a single unified contract, no per-site dict assembly.
+No API key needed: the agent is scripted, the governance is real AGT.
+
+```bash
+ZEMTIK_AUDIT_SECRET=dogfood-secret python sandbox/dogfood_cutover.py
+```
+
+- **Phase A (shadow)** records what it *would* deny but enforces nothing, so the
+  live path keeps running while you inspect the would-be denials. The reads are
+  allowed; the writes are recorded as denied yet still execute.
+- **Phase B (enforce)** blocks the three writes. The policy verdicts are
+  identical to shadow's — flipping to enforce introduces zero false-denies; only
+  enforcement changes.
+- **Kill-switch revert** routes evaluation back to the agent's prior governed
+  path in one toggle (never allow-all); engaging with no governed fallback fails
+  closed.
+- Both phases write durable, HMAC-signed, Merkle-chained trails
+  (`sandbox/dogfood_*.audit.jsonl`, gitignored) that are integrity-checked at the
+  end. The run emits `sandbox/dogfood_cutover_report.md` and exits `0` only on a
+  full PASS.
 
 ## e2e_openai_governed.py — real OpenAI agent
 

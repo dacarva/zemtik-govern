@@ -4,7 +4,30 @@ All notable changes to zemtik-govern are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project versions
 via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 
-## [0.1.0.0] - 2026-06-20
+## [0.2.0.0] - 2026-06-20
+
+### Added
+- **Staged dogfood cutover demo** (`sandbox/dogfood_cutover.py`) — run a simulated
+  fintech agent with seven governed call sites through a real two-phase rollout:
+  Phase A (shadow) records what the governor *would* deny while enforcing nothing,
+  Phase B (enforce) blocks the privileged money-path writes. Verdicts are identical
+  across phases (zero false-denies), the kill-switch reverts to a prior governed
+  path (never allow-all), and both HMAC-signed Merkle audit trails re-verify. Run
+  it with `ZEMTIK_AUDIT_SECRET=dogfood-secret python sandbox/dogfood_cutover.py`;
+  see `docs/sandbox.md`.
+- **E9 adversarial test matrix** (`tests/test_adversarial_e9.py`) — concurrent
+  TOCTOU on a frozen context, policy-bypass attempts (injected subject, malformed
+  and unicode actions, mid-evaluation payload mutation), tamper-after-crash-recovery
+  detection, and concurrent idempotency-key collisions. Hardens the guarantees the
+  three-seam pipeline already makes by trying to break them.
+
+### Changed
+- **CI installs and audits the full dependency set, hash-pinned.** The `test` job
+  now installs from `requirements-all.lock` (runtime + dev + `langchain`/`mcp`/`openai`
+  extras) with `--require-hashes`, so the integration surface is as supply-chain
+  verified as the core. The `supply-chain` job runs a second `pip-audit` over the
+  full lock, so a CVE in an integration dependency fails the build too. The previous
+  unpinned extras install is gone. See `docs/operations.md` for lockfile regeneration.
 
 ### Added
 - **`govern_tool()` and `govern_tools()`** (`zemtik_govern.langchain`) — wrap any

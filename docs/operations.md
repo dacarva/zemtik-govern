@@ -245,6 +245,38 @@ tools are blocked.
 
 ---
 
+## Supply Chain — Regenerating the Lockfiles
+
+CI installs and audits only hash-pinned dependencies in the application
+environment and fails the build on any known CVE (the `supply-chain` job runs
+`pip-audit` against the locks; the `pip-audit` runner itself is fetched via
+`uvx` at a pinned version, not hash-pinned). Three lockfiles are maintained, all
+generated with `uv pip compile --generate-hashes`:
+
+| Lockfile | Scope | CI use | Regenerate with |
+|----------|-------|--------|-----------------|
+| `requirements.lock` | runtime only | installed + audited | `uv pip compile pyproject.toml --generate-hashes -o requirements.lock` |
+| `requirements-dev.lock` | runtime + dev tooling | local lean-dev convenience (not CI-installed) | `uv pip compile pyproject.toml --extra dev --generate-hashes -o requirements-dev.lock` |
+| `requirements-all.lock` | runtime + dev + `langchain`/`mcp`/`openai` extras | installed + audited | `uv pip compile pyproject.toml --extra dev --extra langchain --extra mcp --extra openai --generate-hashes -o requirements-all.lock` |
+
+The CI `test` job installs from `requirements-all.lock` with `--require-hashes`,
+so the langchain/mcp/openai integration surface is as supply-chain-verified as
+the core. `requirements-dev.lock` is a lean local install (runtime + dev, no
+heavy integration extras) for contributors who don't need them; CI does not
+install or audit it because `requirements-all.lock` already covers the same dev
+tooling alongside the extras. The two locks are resolved independently, so a
+dev-only tool can differ by a patch version between them — that's expected, not
+drift. After bumping a dependency range in `pyproject.toml`, regenerate all
+three. The two CI-gated locks must each `pip-audit` clean before the change can
+merge:
+
+```bash
+uvx pip-audit@2.10.1 --require-hashes --requirement requirements.lock --strict
+uvx pip-audit@2.10.1 --require-hashes --requirement requirements-all.lock --strict
+```
+
+Both must exit `0` before the change can merge.
+
 ## Known Operational Limits (v0.1)
 
 These are tracked in `TODOS.md` with priority labels.
