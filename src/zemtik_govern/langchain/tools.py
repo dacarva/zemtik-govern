@@ -25,8 +25,9 @@ logger = logging.getLogger("zemtik_govern")
 
 
 def _is_dev_mode() -> bool:
-    """True when ZEMTIK_DEV env var is set (any non-empty value)."""
-    return bool(os.getenv("ZEMTIK_DEV"))
+    """True when ZEMTIK_DEV is set to a truthy value (not '', '0', 'false', 'no')."""
+    val = os.getenv("ZEMTIK_DEV", "").strip().lower()
+    return val not in ("", "0", "false", "no")
 
 
 def govern_tool(
@@ -265,7 +266,10 @@ class _GovernedTool(BaseTool):
         if denial is not None:
             tool_call_id = input.get("id", "unknown") if isinstance(input, dict) else "unknown"
             return self._handle_denied(denial, wrapped.name, config, tool_call_id=tool_call_id)
-        self._emit_callbacks(config, decision, _extract_subject(config))
+        try:
+            self._emit_callbacks(config, decision, _extract_subject(config))
+        except Exception:
+            logger.debug("LangChain callback error suppressed; tool will still run", exc_info=True)
         return wrapped.invoke(input, config, **kwargs)
 
     async def ainvoke(self, input, config: RunnableConfig | None = None, **kwargs):
@@ -275,7 +279,10 @@ class _GovernedTool(BaseTool):
         if denial is not None:
             tool_call_id = input.get("id", "unknown") if isinstance(input, dict) else "unknown"
             return self._handle_denied(denial, wrapped.name, config, tool_call_id=tool_call_id)
-        self._emit_callbacks(config, decision, _extract_subject(config))
+        try:
+            self._emit_callbacks(config, decision, _extract_subject(config))
+        except Exception:
+            logger.debug("LangChain callback error suppressed; tool will still run", exc_info=True)
         return await wrapped.ainvoke(input, config, **kwargs)
 
     def _handle_denied(

@@ -111,6 +111,13 @@ class GovernedToolNode:
                         tool_call_id=tool_call_id,
                     )
                 )
+            except GovernanceError:
+                results.append(
+                    ToolMessage(
+                        content="tool call blocked: governance error",
+                        tool_call_id=tool_call_id,
+                    )
+                )
 
         return {self._messages_key: results}
 

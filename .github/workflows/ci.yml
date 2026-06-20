@@ -38,6 +38,11 @@ jobs:
       - name: Install the package (no deps — already pinned above)
         run: uv pip install --no-deps -e ".[dev]"
 
+      # Install optional extras so langchain/mcp integration tests run in CI.
+      # These are not hash-pinned (extras are not in requirements-dev.lock).
+      - name: Install optional extras (langchain, mcp)
+        run: uv pip install -e ".[langchain,mcp]"
+
       # Run the venv binaries directly (not `uv run`, which would re-sync and
       # could pull unpinned tooling). The env was populated by the hashed install.
       - name: Lint
