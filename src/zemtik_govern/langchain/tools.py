@@ -14,6 +14,7 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import get_callback_manager_for_config
 from langchain_core.tools import BaseTool
 
 from zemtik_govern.context import GovernanceContext
@@ -175,7 +176,7 @@ class _GovernedTool(BaseTool):
         )
 
     def _invoke_governed_sync(self, input, config):
-        """Run governance synchronously. Returns GovernanceDenied exc or None (allow)."""
+        """Run governance synchronously. Returns (GovernanceDenied|None, Decision|None)."""
         gov = self._get_governor()
         subject = _extract_subject(config)
         action_override = object.__getattribute__(self, "_action_override")
@@ -193,7 +194,7 @@ class _GovernedTool(BaseTool):
                 "[ZEMTIK] ALLOW %s | subject=%s | rule=%s | %dms",
                 wrapped.name, subject, rule, elapsed_ms,
             )
-            return None
+            return None, decision
         except GovernanceDenied as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             rule = getattr(exc.decision, "matched_rule", None) or "unknown"
@@ -201,10 +202,10 @@ class _GovernedTool(BaseTool):
                 "[ZEMTIK] DENY %s | subject=%s | rule=%s | %dms",
                 wrapped.name, subject, rule, elapsed_ms,
             )
-            return exc
+            return exc, exc.decision
 
     async def _invoke_governed_async(self, input, config):
-        """Run governance asynchronously. Returns GovernanceDenied exc or None (allow)."""
+        """Run governance asynchronously. Returns (GovernanceDenied|None, Decision|None)."""
         gov = self._get_governor()
         subject = _extract_subject(config)
         action_override = object.__getattribute__(self, "_action_override")
@@ -222,7 +223,7 @@ class _GovernedTool(BaseTool):
                 "[ZEMTIK] ALLOW %s | subject=%s | rule=%s | %dms",
                 wrapped.name, subject, rule, elapsed_ms,
             )
-            return None
+            return None, decision
         except GovernanceDenied as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             rule = getattr(exc.decision, "matched_rule", None) or "unknown"
@@ -230,7 +231,23 @@ class _GovernedTool(BaseTool):
                 "[ZEMTIK] DENY %s | subject=%s | rule=%s | %dms",
                 wrapped.name, subject, rule, elapsed_ms,
             )
-            return exc
+            return exc, exc.decision
+
+    def _emit_callbacks(self, config: RunnableConfig | None, decision, subject: str) -> None:
+        """Emit governance metadata into LangChain callbacks (opt-in, null-safe)."""
+        if config is None:
+            return
+        cb = get_callback_manager_for_config(config)
+        if cb is None:
+            return
+        metadata = {
+            "governance.decision": "allowed" if decision.allowed else "denied",
+            "governance.rule": decision.matched_rule or "none",
+            "governance.subject": subject,
+        }
+        run_manager = cb.on_chain_start({"name": "zemtik_govern"}, metadata)
+        if run_manager is not None:
+            run_manager.on_chain_end({"governance.decision": metadata["governance.decision"]})
 
     def invoke(self, input, config: RunnableConfig | None = None, **kwargs):
         """Govern then invoke (sync). Raises GovernanceError if called inside event loop."""
@@ -244,19 +261,21 @@ class _GovernedTool(BaseTool):
             )
 
         wrapped = object.__getattribute__(self, "_wrapped")
-        denial = self._invoke_governed_sync(input, config)
+        denial, decision = self._invoke_governed_sync(input, config)
         if denial is not None:
             tool_call_id = input.get("id", "unknown") if isinstance(input, dict) else "unknown"
             return self._handle_denied(denial, wrapped.name, config, tool_call_id=tool_call_id)
+        self._emit_callbacks(config, decision, _extract_subject(config))
         return wrapped.invoke(input, config, **kwargs)
 
     async def ainvoke(self, input, config: RunnableConfig | None = None, **kwargs):
         """Govern then invoke (async)."""
         wrapped = object.__getattribute__(self, "_wrapped")
-        denial = await self._invoke_governed_async(input, config)
+        denial, decision = await self._invoke_governed_async(input, config)
         if denial is not None:
             tool_call_id = input.get("id", "unknown") if isinstance(input, dict) else "unknown"
             return self._handle_denied(denial, wrapped.name, config, tool_call_id=tool_call_id)
+        self._emit_callbacks(config, decision, _extract_subject(config))
         return await wrapped.ainvoke(input, config, **kwargs)
 
     def _handle_denied(
