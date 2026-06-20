@@ -49,6 +49,10 @@ jobs:
 
   supply-chain:
     runs-on: ubuntu-latest
+    # Pin the audit tool once so the supply-chain gate is reproducible and a
+    # version bump touches a single place (both audit steps read this).
+    env:
+      PIP_AUDIT: pip-audit@2.10.1
     steps:
       - uses: actions/checkout@v4
 
@@ -65,8 +69,8 @@ jobs:
       # extras) are scanned — a CVE in an integration dep fails the build too.
       - name: Audit runtime dependencies (pip-audit)
         run: |
-          uvx pip-audit@2.10.1 --require-hashes --requirement requirements.lock --strict
+          uvx "$PIP_AUDIT" --require-hashes --requirement requirements.lock --strict
 
       - name: Audit full dependency set incl. extras (pip-audit)
         run: |
-          uvx pip-audit@2.10.1 --require-hashes --requirement requirements-all.lock --strict
+          uvx "$PIP_AUDIT" --require-hashes --requirement requirements-all.lock --strict
