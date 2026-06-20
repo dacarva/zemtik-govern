@@ -92,6 +92,28 @@ See [`zemtik.example.yaml`](zemtik.example.yaml) for the full annotated configur
 - [Configuration Reference](docs/configuration-reference.md) — YAML fields, mode matrix, env vars, startup validation
 - [Operations Guide](docs/operations.md) — deployment checklist, durable audit, kill-switch, shadow rollout, monitoring
 - [API Reference](docs/api-reference.md) — full public API (classes, protocols, exceptions)
+- [Sandbox & Demos](docs/sandbox.md) — runnable demos: three-seam scenarios, audit forensics, a real `gpt-5.4-nano` agent governed end to end
+
+## Sandbox & Demos
+
+Runnable demos live in [`sandbox/`](sandbox/) and exercise the real pipeline against the live AGT stack:
+
+```bash
+source .venv/bin/activate
+
+# Three-seam scenarios S1–S10 (allow, deny, fail-closed, idempotency)
+ZEMTIK_AUDIT_SECRET=qa-test-secret python sandbox/qa_demo.py
+
+# Audit trail: verify Merkle/HMAC, extract proofs, detect tampering
+ZEMTIK_AUDIT_SECRET=audit-secret python sandbox/auditor.py
+
+# A real gpt-5.4-nano agent governed end to end (needs [langchain,openai] + an OpenAI key)
+uv pip install -e ".[dev,langchain,openai]"
+cp .env.example .env   # then set OPENAI_API_KEY in .env (gitignored)
+python sandbox/e2e_openai_governed.py
+```
+
+See [docs/sandbox.md](docs/sandbox.md) for what each demo proves and its outputs.
 
 ## Development
 
