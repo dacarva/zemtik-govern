@@ -4,6 +4,67 @@ All notable changes to zemtik-govern are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project versions
 via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 
+## [0.1.0.0] - 2026-06-20
+
+### Added
+- **`govern_tool()` and `govern_tools()`** (`zemtik_govern.langchain`) — wrap any
+  LangChain `BaseTool` or callable with the full three-seam governance pipeline.
+  Install with `pip install zemtik-govern[langchain]`. Supports sync (`invoke`) and
+  async (`ainvoke`) execution, configurable denial modes (`on_denied="raise"` or
+  `"tool_message"`), and lazy ZemtikGovern initialization on first call.
+- **`@governed` decorator** — config-based decoration for `@tool` functions.
+  Apply outer (`@governed`) after inner (`@tool`); wrong order raises `GovernanceError`
+  at decoration time with a clear redirect message.
+- **`GovernedToolNode`** — composition-based drop-in for LangGraph's `ToolNode`.
+  Wraps tools via `govern_tool()` at init; catches `GovernanceDenied` and
+  `GovernanceError` per tool call and returns a denial `ToolMessage` with the
+  correct `tool_call_id` instead of crashing the graph.
+- **`govern_tool_node()`** — function shorthand for `GovernedToolNode(...)`.
+- **LangSmith governance trace** — `govern_tool()` emits `governance.decision`,
+  `governance.rule`, and `governance.subject` into LangChain callbacks when the
+  caller passes a `RunnableConfig` with callbacks configured. Zero overhead when
+  callbacks are absent.
+- **`GovernedMCPServer`** (`zemtik_govern.mcp`) — governed MCP tool server; any
+  MCP client (Claude, Cursor, Continue) gets the three-seam pipeline on every tool
+  call. Install with `pip install zemtik-govern[mcp]`. Supports async and sync
+  tool callables and `on_denied="raise"` or `"error_response"`.
+- **`zemtik init langchain` CLI** — `python -m zemtik_govern init langchain`
+  introspects tool schemas and generates a starter `govern.yaml` with all tools
+  denied by default. Pass `--tools-module my_agent.tools` to auto-generate
+  commented allow rules; `--output govern.yaml` to write to a file.
+- **`ZEMTIK_DEV` observability** — set `ZEMTIK_DEV=1` to emit a colored per-call
+  governance log to `stderr`: `[ZEMTIK] ALLOW read_file | subject=agent-1 | rule=allow-tools | 12ms`.
+  Denied calls include the rule name and reason. Zero overhead in production
+  (`ZEMTIK_DEV=0`, `false`, or unset disables completely).
+- **Examples and integration guide** — `examples/langchain_minimal.py` (10-line
+  quickstart), `examples/langgraph_toolnode.py` (drop-in ToolNode demo), and
+  `docs/integrations/langchain.md` (full guide with Error Reference section).
+- **LangChain-first README** — quick start (pip install + 4 lines of Python +
+  5-line govern.yaml) is Section 1; AGT-native API is Section 2.
+- **CI integration test guard** — `tests/test_readme_quickstart.py` executes the
+  exact README code snippet in CI so a doc/code drift breaks the build.
+- **`CONTRIBUTING.md`** and **`.github/ISSUE_TEMPLATE/bug_report.md`** — minimal
+  contributor guide and structured bug report template.
+
+### Fixed
+- **`ZEMTIK_DEV=0` incorrectly enabled dev mode** — `bool("0")` is truthy in
+  Python; `_is_dev_mode()` now checks the value against `"0"`, `"false"`, `"no"`,
+  and `""` so disabling dev mode works as expected.
+- **`GovernedToolNode` crashed on governance system faults** — `GovernanceError`
+  (AGT version mismatch, lazy-init failure, identity/policy timeout) now produces a
+  `ToolMessage("tool call blocked: governance error")` instead of propagating
+  unhandled out of `__call__`.
+- **LangSmith callback error blocked tool execution** — a `BaseCallbackHandler`
+  error after an ALLOW audit entry could prevent the tool from running, creating a
+  divergence between the audit trail and actual execution. Callback errors are now
+  suppressed (logged at DEBUG) so the tool always runs after an audited allow.
+- **CI missing optional extras** — `requirements-dev.lock` covers pytest/ruff only;
+  the `langchain` and `mcp` extras are now installed separately in CI so
+  integration tests run rather than fail at collection.
+- **LLM-controlled tool name reflected in error message** — `GovernedToolNode`
+  now returns `"tool call blocked: unknown tool"` (not `f"unknown tool: {name}"`)
+  to prevent LLM-crafted tool names from appearing in ToolMessage content.
+
 ## [0.0.1.0] - 2026-06-19
 
 ### Added

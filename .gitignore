@@ -7,3 +7,9 @@ __pycache__/
 .coverage
 .pytest_cache/
 .ruff_cache/
+
+# Local secrets + e2e audit artifacts
+.env*
+!.env.example
+sandbox/*.audit.jsonl
+sandbox/e2e_governance_report.*
