@@ -367,3 +367,43 @@ def test_govern_tool_denied_tool_message_logs_warning_in_dev_mode(caplog, monkey
     with caplog.at_level(logging.WARNING, logger="zemtik_govern"):
         governed.invoke({"path": "/secret"})
     assert any("ZEMTIK WARNING" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 — run() and arun() raise GovernanceError (governance bypass guard)
+# ---------------------------------------------------------------------------
+
+
+def test_run_raises_governance_error():
+    """run() must raise GovernanceError — it bypasses governance."""
+    from zemtik_govern.langchain.tools import govern_tool
+
+    gov = _make_governor(allowed=True)
+    governed = govern_tool(read_file, govern=gov)
+    with pytest.raises(GovernanceError, match="run\\(\\).*governance"):
+        governed.run({"path": "/test"})
+
+
+@pytest.mark.asyncio
+async def test_arun_raises_governance_error():
+    """arun() must raise GovernanceError — it bypasses governance."""
+    from zemtik_govern.langchain.tools import govern_tool
+
+    gov = _make_governor(allowed=True)
+    governed = govern_tool(read_file, govern=gov)
+    with pytest.raises(GovernanceError, match="arun\\(\\).*governance"):
+        await governed.arun({"path": "/test"})
+
+
+# ---------------------------------------------------------------------------
+# Fix 3 — args_schema propagated to _GovernedTool
+# ---------------------------------------------------------------------------
+
+
+def test_governed_tool_copies_args_schema():
+    """_GovernedTool.args_schema must equal the wrapped tool's args_schema."""
+    from zemtik_govern.langchain.tools import govern_tool
+
+    gov = _make_governor(allowed=True)
+    governed = govern_tool(read_file, govern=gov)
+    assert governed.args_schema == read_file.args_schema

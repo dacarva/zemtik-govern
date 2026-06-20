@@ -172,10 +172,6 @@ def test_deny_returns_tool_message_with_correct_tool_call_id():
 def test_multiple_tool_calls_deny_one_allow_another():
     from zemtik_govern.langchain import GovernedToolNode
 
-    # read_file: allow; send_email: deny
-    allow_seams = _FakeSeams(allowed=True)
-    deny_seams = _FakeSeams(allowed=False)
-
     class _SelectiveSeams:
         """Allow read_file, deny send_email."""
         async def identify(self, subject):
@@ -266,3 +262,61 @@ def test_concurrent_calls_no_deadlock():
 
     assert not errors, f"Errors in threads: {errors}"
     assert len(results) == 10
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 — denial ToolMessage tool_call_id matches the tool_call's id
+# ---------------------------------------------------------------------------
+
+
+def test_deny_tool_message_tool_call_id_from_governed_tool():
+    """_GovernedTool with on_denied=tool_message must use the input's id field."""
+    from zemtik_govern.langchain.tools import govern_tool
+
+    gov = _make_governor(allowed=False)
+    governed = govern_tool(read_file, govern=gov, on_denied="tool_message")
+    # Simulate a ToolCall dict with an explicit id
+    result = governed.invoke({"path": "/etc/shadow", "id": "tc-fix2"})
+    from langchain_core.messages import ToolMessage
+    assert isinstance(result, ToolMessage)
+    assert result.tool_call_id == "tc-fix2"
+
+
+# ---------------------------------------------------------------------------
+# Fix 4 — GovernedToolNode guards against invalid state
+# ---------------------------------------------------------------------------
+
+
+def test_call_empty_messages_returns_empty():
+    """Empty messages list must return empty results without error."""
+    from zemtik_govern.langchain import GovernedToolNode
+
+    gov = _make_governor(allowed=True)
+    node = GovernedToolNode([read_file], govern=gov)
+
+    result = node({"messages": []})
+    assert result == {"messages": []}
+
+
+def test_call_missing_messages_key_returns_empty():
+    """Missing messages key must return empty results without error."""
+    from zemtik_govern.langchain import GovernedToolNode
+
+    gov = _make_governor(allowed=True)
+    node = GovernedToolNode([read_file], govern=gov)
+
+    result = node({})
+    assert result == {"messages": []}
+
+
+def test_call_last_message_no_tool_calls_returns_empty():
+    """Last message with no tool_calls attribute must return empty results."""
+    from langchain_core.messages import HumanMessage
+    from zemtik_govern.langchain import GovernedToolNode
+
+    gov = _make_governor(allowed=True)
+    node = GovernedToolNode([read_file], govern=gov)
+
+    # HumanMessage has no tool_calls attribute
+    result = node({"messages": [HumanMessage(content="hello")]})
+    assert result == {"messages": []}

@@ -52,6 +52,11 @@ def govern_tool(
             "Pass a GovernanceConfig dict/object as config=, "
             "or a pre-built ZemtikGovern instance as govern=."
         )
+    _VALID_ON_DENIED = {"raise", "tool_message"}
+    if on_denied not in _VALID_ON_DENIED:
+        raise ValueError(
+            f"on_denied must be one of {sorted(_VALID_ON_DENIED)!r}, got {on_denied!r}"
+        )
     return _GovernedTool(tool, config=config, govern=govern, action=action, on_denied=on_denied)
 
 
@@ -115,10 +120,11 @@ class _GovernedTool(BaseTool):
         action=None,
         on_denied="raise",
     ):
-        # Copy name and description from the wrapped tool
+        # Copy name, description, and args_schema from the wrapped tool
         super().__init__(
             name=wrapped_tool.name,
             description=wrapped_tool.description or "",
+            args_schema=getattr(wrapped_tool, "args_schema", None),
         )
         object.__setattr__(self, "_wrapped", wrapped_tool)
         object.__setattr__(self, "_govern", govern)
@@ -150,34 +156,26 @@ class _GovernedTool(BaseTool):
             object.__setattr__(self, "_govern", new_gov)
             return new_gov
 
-    def _build_ctx(self, tool_input: Any, run_manager=None) -> GovernanceContext:
-        action_override = object.__getattribute__(self, "_action_override")
-        wrapped = object.__getattribute__(self, "_wrapped")
-        action = action_override or wrapped.name
-        subject = "langchain"
-        if run_manager is not None:
-            rc = getattr(run_manager, "config", None)
-            subject = _extract_subject(rc)
-        payload = tool_input if isinstance(tool_input, dict) else {"input": tool_input}
-        return GovernanceContext(action=action, subject=subject, payload=payload)
-
     def _run(self, *args, **kwargs):
         """Sync run — delegates to wrapped tool after governance (sync path)."""
         # _run is called by BaseTool.invoke internally after governance via invoke()
         wrapped = object.__getattribute__(self, "_wrapped")
         return wrapped._run(*args, **kwargs)
 
-    def invoke(self, input, config: RunnableConfig | None = None, **kwargs):
-        """Govern then invoke (sync). Raises GovernanceError if called inside event loop."""
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            pass  # No running loop — safe to proceed
-        else:
-            raise GovernanceError(
-                "invoke() called inside a running event loop; use ainvoke() instead"
-            )
+    def run(self, *args, **kwargs):
+        """Blocked — run() bypasses governance; use invoke() instead."""
+        raise GovernanceError(
+            "run() bypasses governance; use invoke() instead"
+        )
 
+    async def arun(self, *args, **kwargs):
+        """Blocked — arun() bypasses governance; use ainvoke() instead."""
+        raise GovernanceError(
+            "arun() bypasses governance; use ainvoke() instead"
+        )
+
+    def _invoke_governed_sync(self, input, config):
+        """Run governance synchronously. Returns GovernanceDenied exc or None (allow)."""
         gov = self._get_governor()
         subject = _extract_subject(config)
         action_override = object.__getattribute__(self, "_action_override")
@@ -195,7 +193,7 @@ class _GovernedTool(BaseTool):
                 "[ZEMTIK] ALLOW %s | subject=%s | rule=%s | %dms",
                 wrapped.name, subject, rule, elapsed_ms,
             )
-            return wrapped.invoke(input, config, **kwargs)
+            return None
         except GovernanceDenied as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             rule = getattr(exc.decision, "matched_rule", None) or "unknown"
@@ -203,10 +201,10 @@ class _GovernedTool(BaseTool):
                 "[ZEMTIK] DENY %s | subject=%s | rule=%s | %dms",
                 wrapped.name, subject, rule, elapsed_ms,
             )
-            return self._handle_denied(exc, wrapped.name, config)
+            return exc
 
-    async def ainvoke(self, input, config: RunnableConfig | None = None, **kwargs):
-        """Govern then invoke (async)."""
+    async def _invoke_governed_async(self, input, config):
+        """Run governance asynchronously. Returns GovernanceDenied exc or None (allow)."""
         gov = self._get_governor()
         subject = _extract_subject(config)
         action_override = object.__getattribute__(self, "_action_override")
@@ -224,7 +222,7 @@ class _GovernedTool(BaseTool):
                 "[ZEMTIK] ALLOW %s | subject=%s | rule=%s | %dms",
                 wrapped.name, subject, rule, elapsed_ms,
             )
-            return await wrapped.ainvoke(input, config, **kwargs)
+            return None
         except GovernanceDenied as exc:
             elapsed_ms = int((time.monotonic() - start) * 1000)
             rule = getattr(exc.decision, "matched_rule", None) or "unknown"
@@ -232,17 +230,43 @@ class _GovernedTool(BaseTool):
                 "[ZEMTIK] DENY %s | subject=%s | rule=%s | %dms",
                 wrapped.name, subject, rule, elapsed_ms,
             )
-            return self._handle_denied(exc, wrapped.name, config)
+            return exc
+
+    def invoke(self, input, config: RunnableConfig | None = None, **kwargs):
+        """Govern then invoke (sync). Raises GovernanceError if called inside event loop."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            pass  # No running loop — safe to proceed
+        else:
+            raise GovernanceError(
+                "invoke() called inside a running event loop; use ainvoke() instead"
+            )
+
+        wrapped = object.__getattribute__(self, "_wrapped")
+        denial = self._invoke_governed_sync(input, config)
+        if denial is not None:
+            tool_call_id = input.get("id", "unknown") if isinstance(input, dict) else "unknown"
+            return self._handle_denied(denial, wrapped.name, config, tool_call_id=tool_call_id)
+        return wrapped.invoke(input, config, **kwargs)
+
+    async def ainvoke(self, input, config: RunnableConfig | None = None, **kwargs):
+        """Govern then invoke (async)."""
+        wrapped = object.__getattribute__(self, "_wrapped")
+        denial = await self._invoke_governed_async(input, config)
+        if denial is not None:
+            tool_call_id = input.get("id", "unknown") if isinstance(input, dict) else "unknown"
+            return self._handle_denied(denial, wrapped.name, config, tool_call_id=tool_call_id)
+        return await wrapped.ainvoke(input, config, **kwargs)
 
     def _handle_denied(
-        self, exc: GovernanceDenied, tool_name: str, config: RunnableConfig | None
+        self,
+        exc: GovernanceDenied,
+        tool_name: str,
+        config: RunnableConfig | None,
+        tool_call_id: str = "unknown",
     ):
         on_denied = object.__getattribute__(self, "_on_denied")
-        tool_call_id = (
-            (config or {}).get("configurable", {}).get("tool_call_id", "unknown")
-            if config
-            else "unknown"
-        )
 
         logger.warning(
             "[ZEMTIK WARNING] %s denied (tool_call_id=%s)",
@@ -251,7 +275,7 @@ class _GovernedTool(BaseTool):
         )
 
         if on_denied == "raise":
-            raise
+            raise exc
 
         if on_denied == "tool_message":
             decision = exc.decision

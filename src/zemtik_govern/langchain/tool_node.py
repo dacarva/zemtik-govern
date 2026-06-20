@@ -7,7 +7,6 @@ preserves the original tool_call_id.
 """
 from __future__ import annotations
 
-import threading
 from typing import Any
 
 from langchain_core.messages import ToolMessage
@@ -52,34 +51,13 @@ class GovernedToolNode:
             )
 
         self._messages_key = messages_key
-        self._config = config
-        self._govern = govern
-        self._lock = threading.Lock()
 
         # Build governed tools keyed by name
+        # Each _GovernedTool handles its own lazy ZemtikGovern init (thread-safe).
         self._governed_tools: dict[str, Any] = {
             t.name: govern_tool(t, govern=govern, config=config, on_denied="raise")
             for t in tools
         }
-
-    def _get_governor(self):
-        """Lazy-init ZemtikGovern from config (thread-safe). Used internally."""
-        if self._govern is not None:
-            return self._govern
-        with self._lock:
-            if self._govern is not None:
-                return self._govern
-            from zemtik_govern._agt import AGTBoundary
-            from zemtik_govern.config import GovernanceConfig
-            from zemtik_govern.registry import GovernanceRegistry
-
-            cfg = self._config
-            if isinstance(cfg, dict):
-                from zemtik_govern.config import GovernanceConfig
-                cfg = GovernanceConfig(**cfg)
-            gov = GovernanceRegistry.from_config(cfg, AGTBoundary()).build()
-            self._govern = gov
-            return gov
 
     def __call__(self, state: dict, config=None) -> dict:
         """Execute governed tool calls from the last message in state.
@@ -91,9 +69,12 @@ class GovernedToolNode:
 
         Returns {messages_key: [list of ToolMessages]}.
         """
-        messages = state[self._messages_key]
+        messages = state.get(self._messages_key, [])
+        if not messages:
+            return {self._messages_key: []}
+
         last_message = messages[-1]
-        tool_calls = last_message.tool_calls
+        tool_calls = getattr(last_message, "tool_calls", None) or []
 
         results: list[ToolMessage] = []
         for tool_call in tool_calls:
