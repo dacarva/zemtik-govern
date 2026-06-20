@@ -11,7 +11,7 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 
-from zemtik_govern.errors import GovernanceDenied
+from zemtik_govern.errors import GovernanceDenied, GovernanceError
 
 from .tools import govern_tool
 
