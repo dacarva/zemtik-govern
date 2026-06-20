@@ -15,10 +15,12 @@ import contextlib
 import hashlib
 import inspect
 import json
+import time
 from collections.abc import Callable, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+from ._cache import BoundedTTLDict
 from .context import GovernanceContext
 from .errors import GovernanceDenied, GovernanceError
 from .protocols import (
@@ -42,6 +44,37 @@ _IDEM_CONFLICT = Decision(
     reason="idempotency key reused for a different request",
     denial_kind="system",
 )
+
+# Defaults for the bounded idempotency cache when a governor is built by hand
+# (not from config). The config path threads its own (validated) values.
+from .config import (  # noqa: E402  (placed here to keep the constant next to use)
+    _DEFAULT_IDEM_MAX_ENTRIES,
+    _DEFAULT_IDEM_TTL_SECONDS,
+)
+
+
+@dataclass
+class _IdemRecord:
+    """One idempotency key's cache entry, shared by both concerns (#35).
+
+    ``fingerprint`` binds the key to the ONE request it was minted for (``None``
+    until the first evaluation — a slot a proxy reserved for an in-flight effect
+    before governance has run). ``decisions`` is the two-level inner map: it keys
+    each cached verdict on ``(mode, killswitch_state)`` so a decision ledgered
+    under one operational stance is never replayed under another (killswitch
+    authority). ``effect`` holds the proxy's in-flight-or-completed tool result
+    future; an entry whose effect is not yet done vetoes eviction so a running
+    effect with concurrent waiters is never orphaned.
+    """
+
+    fingerprint: str | None
+    decisions: dict[tuple[str, bool], tuple[str, Decision]] = field(default_factory=dict)
+    effect: asyncio.Future | None = None
+
+    def is_evictable(self) -> bool:
+        # A completed (or absent) effect evicts freely; an in-flight effect pins
+        # the whole record so its decision and result stay consistent.
+        return self.effect is None or self.effect.done()
 
 
 def _assert_json_native(value: Any) -> None:
@@ -135,6 +168,9 @@ class ZemtikGovern:
         fallback: PolicyEngine | None = None,
         killswitch: Callable[[], bool] | None = None,
         timeout: float | None = None,
+        idem_max_entries: int = _DEFAULT_IDEM_MAX_ENTRIES,
+        idem_ttl_seconds: float | None = _DEFAULT_IDEM_TTL_SECONDS,
+        time_fn: Callable[[], float] = time.monotonic,
     ) -> None:
         """
         Args:
@@ -178,12 +214,22 @@ class ZemtikGovern:
         # OR cancel — the async-context-manager exit runs on all three).
         self._idem_locks: dict[str, asyncio.Lock] = {}
         self._idem_lock_waiters: dict[str, int] = {}
-        # key -> (request fingerprint, did, decision). The fingerprint binds the
-        # key to the ONE request it was minted for: an idempotency key identifies a
-        # request, it is not a bearer token that replays a prior allow onto any
-        # action. A key reused with a different action/subject/payload is a conflict,
-        # not a duplicate, and fails closed (below) rather than bypassing policy.
-        self._idem_ledger: dict[str, tuple[str, str, Decision]] = {}
+        # key -> _IdemRecord. ONE bounded LRU+TTL cache (#35) backs BOTH the
+        # decision ledger and the proxy's effect-dedup slots, so neither grows
+        # without bound under unique-key traffic and the two evict CONSISTENTLY
+        # (one record per key holds both). The fingerprint inside each record binds
+        # the key to the ONE request it was minted for: an idempotency key
+        # identifies a request, it is not a bearer token that replays a prior allow
+        # onto any action. A key reused with a different action/subject/payload is a
+        # conflict, not a duplicate, and fails closed rather than bypassing policy.
+        # Eviction skips a record whose effect future is still in flight so a
+        # running tool call with concurrent waiters is never orphaned.
+        self._idem_cache: BoundedTTLDict[str, _IdemRecord] = BoundedTTLDict(
+            maxsize=idem_max_entries,
+            ttl_seconds=idem_ttl_seconds,
+            time_fn=time_fn,
+            is_evictable=lambda record: record.is_evictable(),
+        )
 
     async def govern(self, ctx: GovernanceContext) -> Decision:
         key = ctx.idempotency_key
@@ -216,16 +262,19 @@ class ZemtikGovern:
                 "idempotency fingerprint failed; tool blocked"
             ) from exc
         async with self._key_lock(key):
-            if key in self._idem_ledger:
-                seen_fp, did, decision = self._idem_ledger[key]
-                if seen_fp != fingerprint:
+            record = self._idem_cache.get(key)
+            if record is not None and record.fingerprint is not None:
+                if record.fingerprint != fingerprint:
                     # Same key, different request: a conflict, not a duplicate.
-                    # Replaying the prior decision here would let an ungoverned
-                    # action ride a recycled key past policy. Fail closed: audit the
-                    # conflict and raise — the tool never runs, policy is never
-                    # bypassed. The conflicting request was never identity-resolved,
-                    # so it is NOT attributable to the prior key holder: stamp the
-                    # reserved unidentified DID, never the cached (first-caller) DID.
+                    # Conflict detection keys on the FINGERPRINT alone (#35, A1), so
+                    # a recycled key with a changed payload is caught regardless of
+                    # the mode/killswitch bucket. Replaying the prior decision here
+                    # would let an ungoverned action ride a recycled key past policy.
+                    # Fail closed: audit the conflict and raise — the tool never
+                    # runs, policy is never bypassed. The conflicting request was
+                    # never identity-resolved, so it is NOT attributable to the prior
+                    # key holder: stamp the reserved unidentified DID, never the
+                    # cached (first-caller) DID.
                     await self._audit.write(
                         AuditEntry.from_decision(
                             ctx,
@@ -238,21 +287,31 @@ class ZemtikGovern:
                     raise GovernanceError(
                         "idempotency key reused for a different request; tool blocked"
                     )
-                # Genuine duplicate: record the REPLAY (not a second success/denied)
-                # so the trail shows it was recognised, then re-apply the original
-                # enforcement so the caller sees the same outcome. Flag the returned
-                # decision as a replay so a DIRECT govern/govern_sync caller can skip
-                # re-running its own side effect (the proxy dedupes effects itself).
-                await self._audit.write(
-                    AuditEntry.from_decision(
-                        ctx, did, decision, outcome="replay", mode=self._mode
+                # Same request: the REPLAY lookup keys on (mode, killswitch_state)
+                # (#35, two-level keying) so a decision ledgered under one stance is
+                # never replayed under another — a key allowed before the killswitch
+                # flipped re-evaluates under the fallback rather than replaying its
+                # stale allow.
+                replay_key = self._replay_key()
+                cached = record.decisions.get(replay_key)
+                if cached is not None:
+                    did, decision = cached
+                    # Genuine duplicate: record the REPLAY (not a second
+                    # success/denied) so the trail shows it was recognised, then
+                    # re-apply enforcement. Flag the returned decision as a replay so
+                    # a DIRECT govern caller can skip re-running its own side effect.
+                    await self._audit.write(
+                        AuditEntry.from_decision(
+                            ctx, did, decision, outcome="replay", mode=self._mode
+                        )
                     )
-                )
-                return self._enforce(replace(decision, replayed=True))
+                    return self._enforce(replace(decision, replayed=True))
+                # Same request, new (mode, killswitch) stance: fall through to a
+                # fresh evaluation and cache it under this stance's bucket.
             did, decision = await self._evaluate_and_audit(ctx)
             # Cache only a completed evaluation; a fail-closed system error raises
             # out of _evaluate_and_audit and is left un-cached so a retry re-runs.
-            self._idem_ledger[key] = (fingerprint, did, decision)
+            self._store_decision(key, fingerprint, did, decision)
             return self._enforce(decision)
 
     async def _evaluate_and_audit(
@@ -292,6 +351,69 @@ class ZemtikGovern:
             AuditEntry.from_decision(ctx, did, decision, mode=self._mode)
         )
         return did, replace(decision, audit_event_id=event_id)
+
+    def _ks_state(self) -> bool:
+        """The killswitch's current engaged state as a plain bool — part of the
+        two-level replay key so a decision is replayed only under the SAME stance.
+        A killswitch that raises is treated as engaged (fail toward the fallback);
+        the actual fault surfaces from ``_select_engine`` during evaluation."""
+        if self._killswitch is None:
+            return False
+        try:
+            return bool(self._killswitch())
+        except Exception:
+            return True
+
+    def _replay_key(self) -> tuple[str, bool]:
+        """The inner two-level key for the decision-replay lookup: ``(mode,
+        killswitch_state)``. Conflict detection does NOT use this — only replay."""
+        return (self._mode, self._ks_state())
+
+    def _store_decision(
+        self, key: str, fingerprint: str, did: str, decision: Decision
+    ) -> None:
+        """Cache a freshly-evaluated decision under ``key`` and the current stance.
+
+        Reuses an existing record (e.g. a slot a proxy reserved for an in-flight
+        effect) so the decision and the effect share ONE record and evict together.
+        """
+        record = self._idem_cache.get(key)
+        if record is None:
+            record = _IdemRecord(fingerprint=fingerprint)
+            self._idem_cache.set(key, record)
+        else:
+            record.fingerprint = fingerprint
+        record.decisions[self._replay_key()] = (did, decision)
+
+    # --- effect-dedup slots shared with _GovernedProxy (#35) -------------------
+    # The proxy's per-key effect future lives in the SAME bounded cache record as
+    # the decision, so one eviction removes both — a recycled key can never pass
+    # fresh governance and still collect a previous request's cached tool result.
+
+    def _effect_get(self, key: str) -> asyncio.Future | None:
+        record = self._idem_cache.get(key)
+        return record.effect if record is not None else None
+
+    def _effect_reserve(self, key: str, fut: asyncio.Future) -> None:
+        """Reserve the in-flight effect slot for ``key`` BEFORE governance runs, so
+        a concurrent duplicate waits on the same execution. Creates a fingerprint-
+        less placeholder record if none exists yet."""
+        record = self._idem_cache.get(key)
+        if record is None:
+            record = _IdemRecord(fingerprint=None)
+            self._idem_cache.set(key, record)
+        record.effect = fut
+
+    def _effect_clear(self, key: str, fut: asyncio.Future) -> None:
+        """Drop a failed/cancelled effect from its record (peek: do not refresh
+        recency). The cached DECISION is left intact so a retry replays governance
+        and re-runs only the tool; a placeholder record with nothing left is
+        deleted so it does not linger."""
+        record = self._idem_cache.peek(key)
+        if record is not None and record.effect is fut:
+            record.effect = None
+            if record.fingerprint is None and not record.decisions:
+                self._idem_cache.delete(key)
 
     @contextlib.asynccontextmanager
     async def _key_lock(self, key: str):
@@ -467,11 +589,12 @@ class _GovernedProxy:
         self._action = action
         self._subject = subject
         self._context_factory = context_factory
-        # idempotency_key -> Future[result]. Dedupes the EFFECT: a keyed duplicate
-        # returns this cached/in-flight result instead of re-invoking the tool. Only
-        # successful effects are cached (failures/denies are popped), so a retry of a
-        # transient fault re-runs. Process-local + unbounded in v0.1 (see TODOS.md).
-        self._results: dict[str, asyncio.Future[Any]] = {}
+        # The per-key effect future lives in the governor's bounded idempotency
+        # cache (#35), NOT a proxy-local dict, so it is bounded and evicts in
+        # lockstep with the matching decision (no stale-effect-on-fresh-key). Dedupes
+        # the EFFECT: a keyed duplicate returns the cached/in-flight result instead
+        # of re-invoking the tool. Only successful effects stay cached (failures and
+        # denies are cleared), so a retry of a transient fault re-runs.
 
     def _build_ctx(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
@@ -507,7 +630,7 @@ class _GovernedProxy:
             await self._gov.govern(ctx)  # raises on deny -> the tool never runs
             return await self._invoke(args, kwargs)
 
-        inflight = self._results.get(key)
+        inflight = self._gov._effect_get(key)
         if inflight is not None:
             # A prior call with this key is in flight or done. Run govern() so the
             # duplicate is audited as a replay (and a key reused for a DIFFERENT
@@ -523,7 +646,7 @@ class _GovernedProxy:
         task: asyncio.Future[Any] = asyncio.ensure_future(
             self._effect(ctx, args, kwargs)
         )
-        self._results[key] = task
+        self._gov._effect_reserve(key, task)
         task.add_done_callback(self._evict_failed_effect(key))
         # ``shield`` so this caller's cancellation can't cancel the shared effect;
         # the task runs to completion once and the done-callback (not this caller)
@@ -541,11 +664,12 @@ class _GovernedProxy:
         not surface as a stray 'task exception was never retrieved'."""
 
         def _evict(task: asyncio.Future[Any]) -> None:
-            # Only a SUCCESSFUL effect stays cached; a cancel or an exception evicts.
+            # Only a SUCCESSFUL effect stays cached; a cancel or an exception clears
+            # the effect slot (the shared record's decision is left intact for a
+            # replay). The governor guards against a same-key task having already
+            # replaced this slot.
             if task.cancelled() or task.exception() is not None:
-                # Guard against a same-key task having already replaced this slot.
-                if self._results.get(key) is task:
-                    del self._results[key]
+                self._gov._effect_clear(key, task)
 
         return _evict
 

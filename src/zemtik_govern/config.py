@@ -43,6 +43,14 @@ _ENFORCING_MODES: tuple[str, ...] = ("strict", "enforce")
 # latency-sensitive deployments lower it, see docs/configuration-reference.md.
 _DEFAULT_DECISION_BUDGET_SECONDS: float = 5.0
 
+# Bounded idempotency caches (#35). Both the decision ledger and the proxy's
+# effect-dedup slots ride one bounded LRU+TTL cache, so unique-key traffic cannot
+# grow them without bound (a DoS surface) and a stale decision expires and
+# re-evaluates. Defaults are generous for a single process; tune down on
+# memory-constrained or high-cardinality-key deployments.
+_DEFAULT_IDEM_MAX_ENTRIES: int = 10_000
+_DEFAULT_IDEM_TTL_SECONDS: float = 3600.0
+
 
 @dataclass(frozen=True)
 class GovernanceConfig:
@@ -67,6 +75,11 @@ class GovernanceConfig:
     # must never silently run unbounded (#33). ``None`` is an explicit opt-out for
     # callers that enforce their own upstream deadline.
     decision_budget_seconds: float | None = _DEFAULT_DECISION_BUDGET_SECONDS
+    # Bounded idempotency cache controls (#35). ``idempotency_max_entries`` caps
+    # the shared LRU; ``idempotency_ttl_seconds`` expires a ledgered decision so a
+    # later same-key request re-evaluates rather than replaying a stale verdict.
+    idempotency_max_entries: int = _DEFAULT_IDEM_MAX_ENTRIES
+    idempotency_ttl_seconds: float | None = _DEFAULT_IDEM_TTL_SECONDS
 
     def __post_init__(self) -> None:
         """Validate the config, raising :class:`GovernanceNotConfigured` on any insecure shape.
@@ -82,6 +95,7 @@ class GovernanceConfig:
             )
         self._validate_rule_shapes()
         self._validate_decision_budget()
+        self._validate_idempotency_caps()
         # Universal: no mode is allowed to run without somewhere to record outcomes.
         if not self.audit_sink:
             raise GovernanceNotConfigured(
@@ -119,6 +133,24 @@ class GovernanceConfig:
         if budget <= 0:
             raise GovernanceNotConfigured(
                 f"decision_budget_seconds must be > 0, got {budget!r}"
+            )
+
+    def _validate_idempotency_caps(self) -> None:
+        """The cache cap must be a positive int; the TTL, if present, a positive
+        finite number of seconds. A zero/negative cap or TTL is a misconfiguration
+        (it would evict everything instantly), not a tuning choice. ``None`` TTL is
+        an explicit opt-out (no expiry). ``bool`` is rejected (an ``int`` subclass)."""
+        cap = self.idempotency_max_entries
+        if isinstance(cap, bool) or not isinstance(cap, int) or cap < 1:
+            raise GovernanceNotConfigured(
+                f"idempotency_max_entries must be a positive int, got {cap!r}"
+            )
+        ttl = self.idempotency_ttl_seconds
+        if ttl is None:
+            return
+        if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0:
+            raise GovernanceNotConfigured(
+                f"idempotency_ttl_seconds must be > 0 or None, got {ttl!r}"
             )
 
     def _validate_policy_source(self) -> None:
@@ -166,12 +198,28 @@ class GovernanceConfig:
                 "config 'decision_budget_seconds' must be a number of seconds or null, "
                 f"got {type(budget).__name__}"
             )
+        cap = data.get("idempotency_max_entries", _DEFAULT_IDEM_MAX_ENTRIES)
+        if isinstance(cap, bool) or not isinstance(cap, int):
+            raise GovernanceNotConfigured(
+                "config 'idempotency_max_entries' must be an int, "
+                f"got {type(cap).__name__}"
+            )
+        ttl = data.get("idempotency_ttl_seconds", _DEFAULT_IDEM_TTL_SECONDS)
+        if ttl is not None and (
+            isinstance(ttl, bool) or not isinstance(ttl, (int, float))
+        ):
+            raise GovernanceNotConfigured(
+                "config 'idempotency_ttl_seconds' must be a number of seconds or null, "
+                f"got {type(ttl).__name__}"
+            )
         return cls(
             mode=str(data.get("mode", "strict")),
             rules=tuple(rules),
             policy_dir=policy_dir,
             audit_sink=audit_sink,
             decision_budget_seconds=budget,
+            idempotency_max_entries=cap,
+            idempotency_ttl_seconds=ttl,
         )
 
     @classmethod

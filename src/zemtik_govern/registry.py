@@ -9,7 +9,7 @@ half-wired governor that quietly skips a concern at request time.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .core import ZemtikGovern
 from .errors import GovernanceNotConfigured
@@ -34,6 +34,23 @@ class GovernanceRegistry:
         # config's (non-None) decision_budget_seconds so a config-built governor is
         # never silently unbounded (#33).
         self._decision_budget_seconds: float | None = None
+        # Bounded idempotency cache controls (#35). None until set so the raw
+        # builder defers to the core defaults; from_config threads the validated
+        # config values so a config-built governor's caches are bounded.
+        self._idem_max_entries: int | None = None
+        self._idem_ttl_seconds: float | None = None
+        self._idem_ttl_set: bool = False
+
+    def register_idempotency_caps(
+        self, max_entries: int, ttl_seconds: float | None
+    ) -> GovernanceRegistry:
+        """The bounded-cache cap and TTL carried into ``ZemtikGovern``. Validated at
+        config time; recorded here so ``build()`` threads them rather than silently
+        defaulting."""
+        self._idem_max_entries = max_entries
+        self._idem_ttl_seconds = ttl_seconds
+        self._idem_ttl_set = True
+        return self
 
     def register_decision_budget(
         self, seconds: float | None
@@ -86,12 +103,20 @@ class GovernanceRegistry:
             raise GovernanceNotConfigured(
                 f"registry missing seam(s): {', '.join(missing)}"
             )
+        # Only override the core's cache defaults when from_config supplied them;
+        # the raw builder leaves them untouched (matching the core default).
+        extra: dict[str, Any] = {}
+        if self._idem_max_entries is not None:
+            extra["idem_max_entries"] = self._idem_max_entries
+        if self._idem_ttl_set:
+            extra["idem_ttl_seconds"] = self._idem_ttl_seconds
         return ZemtikGovern(
             identity=self._identity,  # type: ignore[arg-type]
             policy=self._policy,  # type: ignore[arg-type]
             audit=self._audit,  # type: ignore[arg-type]
             mode=self._mode,
             timeout=self._decision_budget_seconds,
+            **extra,
         )
 
     @classmethod
@@ -117,6 +142,9 @@ class GovernanceRegistry:
             cls()
             .register_mode(config.mode)
             .register_decision_budget(config.decision_budget_seconds)
+            .register_idempotency_caps(
+                config.idempotency_max_entries, config.idempotency_ttl_seconds
+            )
             .register_identity(StaticIdentity(boundary))
             .register_policy(
                 AgentOsPolicy(boundary, rules=rules, root_dir=config.policy_dir)

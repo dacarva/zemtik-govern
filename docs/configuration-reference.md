@@ -140,6 +140,41 @@ Promoting this to a single **end-to-end deadline** across the whole `govern()` c
 
 ---
 
+### `idempotency_max_entries` / `idempotency_ttl_seconds`
+
+Bound the idempotency caches (#35). The decision ledger and the proxy's
+effect-dedup slots share **one** bounded LRU+TTL cache (`BoundedTTLDict`, stdlib
+`OrderedDict` — no new dependency), so unique-key traffic can no longer grow them
+without bound (a DoS / memory-leak surface) and a stale decision expires and
+re-evaluates.
+
+```yaml
+# defaults: 10000 entries, 3600s (1h) TTL
+idempotency_max_entries: 10000
+idempotency_ttl_seconds: 3600.0
+```
+
+| Field | Value | Meaning |
+|-------|-------|---------|
+| `idempotency_max_entries` | positive int | LRU cap; oldest **evictable** entry is dropped past the cap |
+| `idempotency_ttl_seconds` | positive number | a ledgered decision past this age re-evaluates instead of replaying |
+| `idempotency_ttl_seconds` | `null` | no expiry (LRU-only) |
+| either, `0`/negative/non-numeric | — | startup error (`GovernanceNotConfigured`) |
+
+The two concerns ride one cache **record** per key, so they evict **consistently**:
+a record holding an **in-flight effect future** vetoes its own eviction (a running
+tool call with concurrent waiters is never orphaned), and an evicted key removes
+its decision *and* its cached effect together — a recycled key can never pass
+fresh governance and still collect a previous request's tool result.
+
+**Two-level keying:** the cached-decision **replay** lookup keys on `(key, mode,
+killswitch_state)`, so a decision ledgered before the killswitch flipped
+re-enforces under the fallback rather than replaying its stale allow. **Conflict
+detection** stays keyed on the request **fingerprint** alone, so a recycled key
+with a changed payload is still caught regardless of the mode/killswitch bucket.
+
+---
+
 ## Environment Variables
 
 ### `ZEMTIK_AUDIT_SECRET`
@@ -173,6 +208,9 @@ class GovernanceConfig:
     rules: tuple[dict, ...] = ()
     policy_dir: str | None = None
     audit_sink: str | None = None
+    decision_budget_seconds: float | None = 5.0
+    idempotency_max_entries: int = 10000
+    idempotency_ttl_seconds: float | None = 3600.0
 ```
 
 ### `classmethod load(path: str | Path) → GovernanceConfig`
