@@ -1,0 +1,9 @@
+mode: strict
+audit_sink: memory
+rules:
+  - name: allow-add-numbers
+    condition:
+      field: action
+      operator: eq
+      value: add_numbers
+    action: allow
