@@ -101,6 +101,45 @@ enforcing mode is a startup error.
 
 ---
 
+### `decision_budget_seconds`
+
+The per-call decision budget, **in seconds**, for the identity + policy path.
+Threaded from config → registry → `ZemtikGovern(timeout=)`, so a config-built
+governor is bounded by default rather than silently running unbounded.
+
+```yaml
+# default: 5.0 — lower it on latency-sensitive (e.g. voice) paths
+decision_budget_seconds: 5.0
+```
+
+| Value | Meaning |
+|-------|---------|
+| omitted | defaults to `5.0` seconds |
+| a positive number | that many seconds |
+| `null` | **opt out** — no budget; only safe when an upstream caller enforces its own deadline |
+| `0`, negative, or non-numeric | startup error (`GovernanceNotConfigured`) — a non-positive budget would deny all traffic |
+
+**Unit is in the name** (`_seconds`) on purpose: it kills the seconds-vs-milliseconds
+1000× footgun at the call site.
+
+**Budget semantics — what it covers (v0.2):** the budget wraps **each** awaited
+seam call *individually* — the identity resolve and the policy evaluation — via an
+explicit **deadline race** (not `asyncio.wait_for`). The race decides on the timer,
+never on the engine: once the budget is blown the engine is cancelled and its
+result is **never observed**, so a *cancel-swallowing* engine that returns an allow
+after the deadline cannot turn a breached budget into an implicit allow (#34, T2).
+A breach is a **system fault** routed through the fail-closed path — audited, then
+`GovernanceError`; the tool never runs.
+
+It remains **per-await, not yet end-to-end**: it does NOT bound idempotency
+lock-wait, injection projection, executor queue time, or the audit write.
+(Idempotency locking is now **per-key** (#34, T-LOCK), so a slow key no longer
+head-of-line-blocks unrelated keys, but the budget still does not span lock-wait.)
+Promoting this to a single **end-to-end deadline** across the whole `govern()` call
+(so the SLA also accounts for lock-wait + audit + injection) is future work.
+
+---
+
 ## Environment Variables
 
 ### `ZEMTIK_AUDIT_SECRET`
@@ -172,7 +211,7 @@ These are not in the YAML file; pass them to `ZemtikGovern()` or via
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `timeout` | `float \| None` | `None` | Per-call decision budget (seconds) for identity + policy. Not currently wired through `GovernanceConfig` (see `TODOS.md` P2). |
+| `timeout` | `float \| None` | `None` | Per-call decision budget (seconds) for identity + policy. Wired through `GovernanceConfig` via the `decision_budget_seconds` field (above) — a config-built governor receives it, defaulting to `5.0`; pass `timeout=` directly only when constructing `ZemtikGovern` by hand. |
 | `mode` | `str` | `"enforce"` | Runtime mode; overrides the mode the registry sets. |
 | `fallback` | `PolicyEngine \| None` | `None` | Policy engine to use when kill-switch is engaged. |
 | `killswitch` | `Callable[[], bool] \| None` | `None` | Zero-arg callable; `True` means use fallback engine. |

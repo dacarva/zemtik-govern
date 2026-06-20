@@ -40,3 +40,10 @@ rules:
 
 # Alternatively, load rules from a directory of policy files instead of inline:
 # policy_dir: ./policies
+
+# Per-call decision budget, in SECONDS, for the identity + policy path. A breach
+# fails closed (audited system error; the tool never runs), never an implicit
+# allow. Defaults to 5.0; lower it on latency-sensitive (e.g. voice) paths. Set to
+# null to opt out — only when an upstream caller enforces its own deadline.
+# Unit is in the name to kill the seconds-vs-ms footgun.
+decision_budget_seconds: 5.0

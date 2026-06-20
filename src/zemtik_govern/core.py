@@ -11,10 +11,11 @@ the tool on a governance fault).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import inspect
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from typing import Any
 
@@ -43,16 +44,50 @@ _IDEM_CONFLICT = Decision(
 )
 
 
+def _assert_json_native(value: Any) -> None:
+    """Reject anything the old ``default=str`` encoder would have LOSSILY coerced:
+    non-string mapping keys and any non-JSON-native leaf (tuple, set, bytes,
+    ``datetime``, ``Decimal``, a custom object…). Two distinct such values could
+    stringify alike and collapse to one fingerprint — a false replay. Floats are
+    left for ``allow_nan=False`` below to police (NaN/Inf). Raises ``TypeError``,
+    which the keyed fail-closed boundary in :meth:`ZemtikGovern.govern` catches,
+    audits, and re-raises as :class:`GovernanceError` — the tool never runs."""
+    if isinstance(value, Mapping):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise TypeError(f"non-string mapping key: {k!r}")
+            _assert_json_native(v)
+    elif isinstance(value, list):
+        for v in value:
+            _assert_json_native(v)
+    elif isinstance(value, (str, int, float)) or value is None:
+        # bool is a subclass of int — admitted here, as JSON-native.
+        return
+    else:
+        raise TypeError(f"non-JSON-native value: {type(value).__name__}")
+
+
 def _request_fingerprint(ctx: GovernanceContext) -> str:
     """A stable hash of the part of the request policy actually decides on —
     action, subject, payload. Binds an idempotency key to ONE request so a key
     reused for a different action/subject/payload is detected as a conflict.
     ``ts`` and ``extra`` are excluded: a retried request keeps its identity even
-    if the clock or out-of-band metadata moved."""
+    if the clock or out-of-band metadata moved.
+
+    Strict by design (#32): no ``default=`` fallback (so a non-serialisable
+    payload is rejected, never lossily stringified), ``allow_nan=False`` (NaN/Inf
+    are rejected, not emitted as non-standard tokens), and string-only mapping
+    keys (``json.dumps`` would silently coerce ``int``/``bool`` keys to strings,
+    collapsing ``{1: …}`` and ``{"1": …}``). Rejection happens at THIS seam,
+    inside the fail-closed boundary, so it is audited as a conflict/error — a
+    construction-time reject would never reach ``govern()`` to be recorded."""
+    payload = ctx.to_dict()["payload"]
+    _assert_json_native(payload)
     canonical = json.dumps(
-        {"action": ctx.action, "subject": ctx.subject, "payload": ctx.to_dict()["payload"]},
+        {"action": ctx.action, "subject": ctx.subject, "payload": payload},
         sort_keys=True,
-        default=str,
+        allow_nan=False,
+        separators=(",", ":"),
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
@@ -133,7 +168,16 @@ class ZemtikGovern:
         # submissions can't both slip through as fresh evaluations. v0.1 keeps the
         # ledger in memory (process-local, unbounded); a durable store plugs in
         # here in v0.2 without changing the govern() contract.
-        self._idem_lock = asyncio.Lock()
+        # Per-key idempotency locks (#34, T-LOCK / Codex #10). One global lock
+        # would serialise EVERY keyed request, so a slow key head-of-line-blocks
+        # unrelated keys on the latency path. A per-key map lets distinct keys
+        # evaluate concurrently while still serialising same-key duplicates. The
+        # companion waiter-count map drives cleanup so the lock map does not become
+        # a new unbounded map: an entry lives only while a coroutine holds-or-waits
+        # on it, and is deleted the moment the last one releases (success, failure,
+        # OR cancel — the async-context-manager exit runs on all three).
+        self._idem_locks: dict[str, asyncio.Lock] = {}
+        self._idem_lock_waiters: dict[str, int] = {}
         # key -> (request fingerprint, did, decision). The fingerprint binds the
         # key to the ONE request it was minted for: an idempotency key identifies a
         # request, it is not a bearer token that replays a prior allow onto any
@@ -171,7 +215,7 @@ class ZemtikGovern:
             raise GovernanceError(
                 "idempotency fingerprint failed; tool blocked"
             ) from exc
-        async with self._idem_lock:
+        async with self._key_lock(key):
             if key in self._idem_ledger:
                 seen_fp, did, decision = self._idem_ledger[key]
                 if seen_fp != fingerprint:
@@ -249,26 +293,78 @@ class ZemtikGovern:
         )
         return did, replace(decision, audit_event_id=event_id)
 
+    @contextlib.asynccontextmanager
+    async def _key_lock(self, key: str):
+        """Serialise same-key requests on a lock unique to *key*, while distinct
+        keys stay independent. The waiter count is bumped BEFORE the first await so
+        a concurrent same-key caller is guaranteed to find (and reuse) the live
+        entry rather than mint a second lock — safe because asyncio runs this
+        get-or-create + increment without interleaving. On exit (normal, error, or
+        cancellation) the count is decremented and the entry deleted once it hits
+        zero, so the map holds only currently-contended keys."""
+        lock = self._idem_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._idem_locks[key] = lock
+        self._idem_lock_waiters[key] = self._idem_lock_waiters.get(key, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            self._idem_lock_waiters[key] -= 1
+            if self._idem_lock_waiters[key] == 0:
+                del self._idem_lock_waiters[key]
+                del self._idem_locks[key]
+
     async def _with_budget(self, coro):
         """Await *coro* under the configured decision budget. With no budget, a
-        plain await; with one, ``asyncio.wait_for`` — whose ``TimeoutError`` is an
-        ordinary exception caught by the fail-closed boundary above.
+        plain await; with one, an explicit **deadline race** between the engine and
+        a timer. A breach raises ``TimeoutError`` — an ordinary exception caught by
+        the fail-closed boundary above.
 
-        **Known limitation (tracked in TODOS.md)**: ``asyncio.wait_for`` cancels
-        the inner coroutine on a timeout breach, but it cannot prevent a
-        *well-intentioned-but-wrong* engine from catching ``CancelledError``
-        internally and returning a value anyway.  In that CPython edge case
-        ``wait_for`` will return that value after the budget has already been
-        declared breached — effectively producing a post-breach result.  This
-        guard therefore assumes that identity and policy engines are
-        *cancellation-safe*: they do not catch ``asyncio.CancelledError`` and
-        swallow it.  Fixing this properly requires a more invasive design (shield
-        + cancel + re-await with a secondary timeout), which is deferred to a
-        future sprint.
+        Why a race and not ``asyncio.wait_for`` (#34, T2 / Codex #1): ``wait_for``
+        only surfaces a ``TimeoutError`` if the inner coroutine lets its
+        cancellation *propagate*. A *well-intentioned-but-wrong* engine that
+        catches ``CancelledError`` and returns a value anyway makes ``wait_for``
+        hand that value back AFTER the budget was already blown — a post-breach
+        result, the exact fail-closed bypass the budget exists to close.
+
+        The race closes it by deciding on the TIMER, not on the engine: if the
+        timer is among the completed tasks, the budget is breached, full stop. The
+        engine is cancelled and its result is **never observed** (premise P4) — a
+        cancel-swallowing engine cannot turn a breached budget into an allow. Only
+        when the engine wins outright (timer not yet fired) is its result read.
         """
         if self._timeout is None:
             return await coro
-        return await asyncio.wait_for(coro, self._timeout)
+        engine_task = asyncio.ensure_future(coro)
+        timer = asyncio.ensure_future(asyncio.sleep(self._timeout))
+        try:
+            done, _pending = await asyncio.wait(
+                {engine_task, timer}, return_when=asyncio.FIRST_COMPLETED
+            )
+        except asyncio.CancelledError:
+            # This coroutine itself was cancelled (e.g. an outer budget/caller):
+            # tear both children down before propagating so neither is orphaned.
+            engine_task.cancel()
+            timer.cancel()
+            raise
+        # Decide on the timer, never the engine. If the timer fired, the budget is
+        # breached even if the engine ALSO finished in the same wakeup — we do not
+        # read engine_task.result() on a breach (P4).
+        if timer in done:
+            engine_task.cancel()
+            # Drain the cancelled engine so a swallowed cancel (it returns a value
+            # or raises) cannot surface as an unretrieved task exception. Its
+            # outcome is discarded either way — the budget already lost.
+            with contextlib.suppress(BaseException):
+                await engine_task
+            raise TimeoutError(f"decision budget of {self._timeout}s exceeded")
+        # Engine won the race. Cancel the now-moot timer and return the result.
+        timer.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await timer
+        return engine_task.result()
 
     def _enforce(self, decision: Decision) -> Decision:
         # Shadow mode observes only: the denial is recorded but NOT enforced, so the

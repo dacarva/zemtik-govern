@@ -37,6 +37,12 @@ VALID_MODES: tuple[str, ...] = ("strict", "shadow", "enforce")
 # Modes that block on policy: they MUST have a usable policy source.
 _ENFORCING_MODES: tuple[str, ...] = ("strict", "enforce")
 
+# The default per-call decision budget (seconds). Bounds the identity + policy
+# path so a config-built governor is never silently unbounded. Generous enough to
+# not trip a healthy engine, tight enough that a hung seam fails closed promptly;
+# latency-sensitive deployments lower it, see docs/configuration-reference.md.
+_DEFAULT_DECISION_BUDGET_SECONDS: float = 5.0
+
 
 @dataclass(frozen=True)
 class GovernanceConfig:
@@ -55,6 +61,12 @@ class GovernanceConfig:
     rules: tuple[dict[str, Any], ...] = ()
     policy_dir: str | None = None
     audit_sink: str | None = None
+    # Per-call decision budget (SECONDS) for the identity + policy path, threaded
+    # to ``ZemtikGovern(timeout=)``. Unit-suffixed (D5) so the seconds-vs-ms 1000×
+    # footgun dies at the name. Defaults to a real bound — a config-built governor
+    # must never silently run unbounded (#33). ``None`` is an explicit opt-out for
+    # callers that enforce their own upstream deadline.
+    decision_budget_seconds: float | None = _DEFAULT_DECISION_BUDGET_SECONDS
 
     def __post_init__(self) -> None:
         """Validate the config, raising :class:`GovernanceNotConfigured` on any insecure shape.
@@ -69,6 +81,7 @@ class GovernanceConfig:
                 f"unknown mode {self.mode!r}; expected one of {VALID_MODES}"
             )
         self._validate_rule_shapes()
+        self._validate_decision_budget()
         # Universal: no mode is allowed to run without somewhere to record outcomes.
         if not self.audit_sink:
             raise GovernanceNotConfigured(
@@ -85,6 +98,28 @@ class GovernanceConfig:
                 raise GovernanceNotConfigured(
                     f"rule {i} must be a mapping, got {type(rule).__name__}"
                 )
+
+    def _validate_decision_budget(self) -> None:
+        """A budget that is present must be a positive, finite number of seconds.
+
+        ``None`` (explicit opt-out) is allowed; ``0``, negatives, and non-numbers
+        are not — a non-positive budget would make every decision time out instantly,
+        denying all traffic, which is a misconfiguration, not a security stance.
+        ``bool`` is rejected explicitly: it is an ``int`` subclass, and ``True`` as a
+        1-second budget is almost certainly a typo, not an intent.
+        """
+        budget = self.decision_budget_seconds
+        if budget is None:
+            return
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)):
+            raise GovernanceNotConfigured(
+                f"decision_budget_seconds must be a number of seconds or None, "
+                f"got {type(budget).__name__}"
+            )
+        if budget <= 0:
+            raise GovernanceNotConfigured(
+                f"decision_budget_seconds must be > 0, got {budget!r}"
+            )
 
     def _validate_policy_source(self) -> None:
         """Raise if an enforcing mode has no usable policy source (no rules AND no policy_dir)."""
@@ -123,11 +158,20 @@ class GovernanceConfig:
         audit_sink = data.get("audit_sink")
         if audit_sink is not None and not isinstance(audit_sink, str):
             raise GovernanceNotConfigured("config 'audit_sink' must be a string")
+        budget = data.get("decision_budget_seconds", _DEFAULT_DECISION_BUDGET_SECONDS)
+        if budget is not None and (
+            isinstance(budget, bool) or not isinstance(budget, (int, float))
+        ):
+            raise GovernanceNotConfigured(
+                "config 'decision_budget_seconds' must be a number of seconds or null, "
+                f"got {type(budget).__name__}"
+            )
         return cls(
             mode=str(data.get("mode", "strict")),
             rules=tuple(rules),
             policy_dir=policy_dir,
             audit_sink=audit_sink,
+            decision_budget_seconds=budget,
         )
 
     @classmethod

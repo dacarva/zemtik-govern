@@ -29,6 +29,21 @@ class GovernanceRegistry:
         self._policy: PolicyEngine | None = None
         self._audit: AuditSink | None = None
         self._mode: str = "enforce"
+        # Per-call decision budget (seconds) for identity + policy. None until set
+        # so the raw builder matches the core default; from_config threads the
+        # config's (non-None) decision_budget_seconds so a config-built governor is
+        # never silently unbounded (#33).
+        self._decision_budget_seconds: float | None = None
+
+    def register_decision_budget(
+        self, seconds: float | None
+    ) -> GovernanceRegistry:
+        """The per-call decision budget (seconds) carried into ``ZemtikGovern(
+        timeout=)``. ``None`` leaves the path unbounded (opt-out). Validated at
+        config time; recorded here so ``build()`` threads it rather than silently
+        defaulting to no budget."""
+        self._decision_budget_seconds = seconds
+        return self
 
     def register_mode(self, mode: str) -> GovernanceRegistry:
         """The operational mode (``shadow``/``enforce``/``strict``) the built core
@@ -76,6 +91,7 @@ class GovernanceRegistry:
             policy=self._policy,  # type: ignore[arg-type]
             audit=self._audit,  # type: ignore[arg-type]
             mode=self._mode,
+            timeout=self._decision_budget_seconds,
         )
 
     @classmethod
@@ -100,6 +116,7 @@ class GovernanceRegistry:
         return (
             cls()
             .register_mode(config.mode)
+            .register_decision_budget(config.decision_budget_seconds)
             .register_identity(StaticIdentity(boundary))
             .register_policy(
                 AgentOsPolicy(boundary, rules=rules, root_dir=config.policy_dir)
