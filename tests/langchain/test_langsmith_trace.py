@@ -1,15 +1,16 @@
 """Tests for LangSmith trace — governance metadata via langchain-core callbacks (issue #18)."""
 from __future__ import annotations
 
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
 
-from zemtik_govern.langchain.tools import govern_tool
 from zemtik_govern.core import ZemtikGovern
-from zemtik_govern.protocols import Decision
 from zemtik_govern.identity import AgentRef
+from zemtik_govern.langchain.tools import govern_tool
+from zemtik_govern.protocols import Decision
 
 
 class _FakeSeams:

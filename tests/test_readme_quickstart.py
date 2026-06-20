@@ -10,8 +10,6 @@ import sys
 import textwrap
 from pathlib import Path
 
-import pytest
-
 README = Path(__file__).parent.parent / "README.md"
 
 

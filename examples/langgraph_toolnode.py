@@ -3,6 +3,7 @@
 Debug: ZEMTIK_DEV=1 python examples/langgraph_toolnode.py
 """
 import os
+
 os.environ.setdefault("ZEMTIK_DEV", "1")
 
 from langchain_core.messages import AIMessage
@@ -46,7 +47,9 @@ state = {
     "messages": [
         AIMessage(
             content="",
-            tool_calls=[{"name": "search_web", "args": {"query": "zemtik governance"}, "id": "tc-1"}],
+            tool_calls=[
+                {"name": "search_web", "args": {"query": "zemtik governance"}, "id": "tc-1"},
+            ],
         )
     ]
 }

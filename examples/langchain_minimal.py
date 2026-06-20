@@ -4,6 +4,7 @@ Copy-paste demo: govern a single tool in under 10 lines.
 Debug: ZEMTIK_DEV=1 python examples/langchain_minimal.py
 """
 import os
+
 os.environ.setdefault("ZEMTIK_DEV", "1")
 
 from langchain_core.tools import tool

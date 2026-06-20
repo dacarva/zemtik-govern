@@ -5,9 +5,7 @@ TDD — vertical slices, one test → one implementation at a time.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import os
 
 import pytest
 from langchain_core.tools import tool
@@ -16,7 +14,6 @@ from zemtik_govern.core import ZemtikGovern
 from zemtik_govern.errors import GovernanceDenied, GovernanceError
 from zemtik_govern.identity import AgentRef
 from zemtik_govern.protocols import Decision
-
 
 # ---------------------------------------------------------------------------
 # Shared fake governor helpers (pattern from tests/test_core.py)

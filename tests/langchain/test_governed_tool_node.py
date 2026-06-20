@@ -8,7 +8,6 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool
 
 from zemtik_govern.core import ZemtikGovern
-from zemtik_govern.errors import GovernanceDenied
 from zemtik_govern.identity import AgentRef
 from zemtik_govern.protocols import Decision
 
@@ -314,6 +313,7 @@ def test_call_missing_messages_key_returns_empty():
 def test_call_last_message_no_tool_calls_returns_empty():
     """Last message with no tool_calls attribute must return empty results."""
     from langchain_core.messages import HumanMessage
+
     from zemtik_govern.langchain import GovernedToolNode
 
     gov = _make_governor(allowed=True)
