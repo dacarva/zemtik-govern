@@ -260,6 +260,8 @@ def test_concurrent_calls_no_deadlock():
     for t in threads:
         t.join(timeout=5)
 
+    alive = [t for t in threads if t.is_alive()]
+    assert not alive, f"{len(alive)} threads still alive after 5s — possible deadlock"
     assert not errors, f"Errors in threads: {errors}"
     assert len(results) == 10
 

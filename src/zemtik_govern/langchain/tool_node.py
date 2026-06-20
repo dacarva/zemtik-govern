@@ -86,7 +86,7 @@ class GovernedToolNode:
             if governed is None:
                 results.append(
                     ToolMessage(
-                        content=f"unknown tool: {name}",
+                        content="tool call blocked: unknown tool",
                         tool_call_id=tool_call_id,
                     )
                 )
