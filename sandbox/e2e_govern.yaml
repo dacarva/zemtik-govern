@@ -1,0 +1,25 @@
+# E2E governance policy — deny-by-default moat in action.
+#
+# READS are explicitly allowed. WRITES (transfer_funds, close_account) have NO
+# rule, so AgentOsPolicy's deny-by-default override blocks them. The audit trail
+# therefore captures BOTH an allow path and a deny path in one real agent run.
+#
+# action == tool name (govern_tool defaults GovernanceContext.action to the
+# wrapped tool's .name). See src/zemtik_govern/langchain/tools.py:185.
+mode: enforce
+audit_sink: sandbox/e2e.audit.jsonl
+rules:
+  - name: allow-get-balance
+    condition:
+      field: action
+      operator: eq
+      value: get_balance
+    action: allow
+  - name: allow-list-accounts
+    condition:
+      field: action
+      operator: eq
+      value: list_accounts
+    action: allow
+  # transfer_funds  -> no rule -> DENIED by default
+  # close_account   -> no rule -> DENIED by default
