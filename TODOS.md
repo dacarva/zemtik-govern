@@ -137,6 +137,10 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   plan E7.
   **Completed:** v0.0.1.0 (2026-06-19) — `requirements-dev.lock` with `--require-hashes`
   install is wired in CI; `pip-audit` OSV gate runs against `requirements.lock`.
+  (2026-06-20) — gap closed: `requirements-all.lock` hash-pins the
+  `langchain`/`mcp`/`openai` extras; the CI `test` job installs from it with
+  `--require-hashes` and the `supply-chain` job audits it too. Lockfile
+  regeneration is documented in `docs/operations.md`.
 
 - **Adversarial test matrix — E9** (issue #25)
   **Priority:** P1
@@ -144,6 +148,10 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   policy bypass attempts (injected subject, malformed action, payload mutation),
   audit chain integrity after crash/recovery, and idempotency key collision
   attacks. Deferred from sprint plan E9.
+  **Completed:** v0.0.1.0 (2026-06-20) — `tests/test_adversarial_e9.py` adds the
+  four E9 attack classes (concurrent-mutation TOCTOU, injected-subject /
+  malformed-action / mid-evaluation payload-mutation bypass, tamper-after-
+  recovery detection, concurrent idempotency-key collision).
 
 - **Pin GitHub Actions to commit SHAs**
   **Priority:** P2

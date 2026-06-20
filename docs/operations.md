@@ -245,6 +245,30 @@ tools are blocked.
 
 ---
 
+## Supply Chain — Regenerating the Lockfiles
+
+CI installs only hash-pinned dependencies and fails the build on any known CVE
+(the `supply-chain` job runs `pip-audit` against the locks). Three lockfiles are
+maintained, all generated with `uv pip compile --generate-hashes`:
+
+| Lockfile | Scope | Regenerate with |
+|----------|-------|-----------------|
+| `requirements.lock` | runtime only | `uv pip compile pyproject.toml --generate-hashes -o requirements.lock` |
+| `requirements-dev.lock` | runtime + dev tooling | `uv pip compile pyproject.toml --extra dev --generate-hashes -o requirements-dev.lock` |
+| `requirements-all.lock` | runtime + dev + `langchain`/`mcp`/`openai` extras | `uv pip compile pyproject.toml --extra dev --extra langchain --extra mcp --extra openai --generate-hashes -o requirements-all.lock` |
+
+The CI `test` job installs from `requirements-all.lock` with `--require-hashes`,
+so the langchain/mcp/openai integration surface is as supply-chain-verified as
+the core. After bumping a dependency range in `pyproject.toml`, regenerate all
+three and verify:
+
+```bash
+uvx pip-audit@2.10.1 --require-hashes --requirement requirements.lock --strict
+uvx pip-audit@2.10.1 --require-hashes --requirement requirements-all.lock --strict
+```
+
+Both must exit `0` before the change can merge.
+
 ## Known Operational Limits (v0.1)
 
 These are tracked in `TODOS.md` with priority labels.

@@ -13,3 +13,4 @@ __pycache__/
 !.env.example
 sandbox/*.audit.jsonl
 sandbox/e2e_governance_report.*
+sandbox/dogfood_cutover_report.md
