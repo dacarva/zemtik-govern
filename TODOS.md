@@ -148,7 +148,7 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   policy bypass attempts (injected subject, malformed action, payload mutation),
   audit chain integrity after crash/recovery, and idempotency key collision
   attacks. Deferred from sprint plan E9.
-  **Completed:** v0.0.1.0 (2026-06-20) — `tests/test_adversarial_e9.py` adds the
+  **Completed:** v0.2.0.0 (2026-06-20) — `tests/test_adversarial_e9.py` adds the
   four E9 attack classes (concurrent-mutation TOCTOU, injected-subject /
   malformed-action / mid-evaluation payload-mutation bypass, tamper-after-
   recovery detection, concurrent idempotency-key collision).

@@ -92,7 +92,7 @@ See [`zemtik.example.yaml`](zemtik.example.yaml) for the full annotated configur
 - [Configuration Reference](docs/configuration-reference.md) — YAML fields, mode matrix, env vars, startup validation
 - [Operations Guide](docs/operations.md) — deployment checklist, durable audit, kill-switch, shadow rollout, monitoring
 - [API Reference](docs/api-reference.md) — full public API (classes, protocols, exceptions)
-- [Sandbox & Demos](docs/sandbox.md) — runnable demos: three-seam scenarios, audit forensics, a real `gpt-5.4-nano` agent governed end to end
+- [Sandbox & Demos](docs/sandbox.md) — runnable demos: three-seam scenarios, audit forensics, staged shadow → enforce cutover, a real `gpt-5.4-nano` agent governed end to end
 
 ## Sandbox & Demos
 
@@ -106,6 +106,9 @@ ZEMTIK_AUDIT_SECRET=qa-test-secret python sandbox/qa_demo.py
 
 # Audit trail: verify Merkle/HMAC, extract proofs, detect tampering
 ZEMTIK_AUDIT_SECRET=audit-secret python sandbox/auditor.py
+
+# Staged dogfood cutover: shadow -> enforce, kill-switch revert, audit integrity (no API key)
+ZEMTIK_AUDIT_SECRET=dogfood-secret python sandbox/dogfood_cutover.py
 
 # A real gpt-5.4-nano agent governed end to end (needs [langchain,openai] + an OpenAI key)
 uv pip install -e ".[dev,langchain,openai]"
