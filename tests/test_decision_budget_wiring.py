@@ -127,6 +127,7 @@ def test_from_config_gives_core_a_non_none_budget():
         ],
         audit_sink="memory",
         decision_budget_seconds=2.0,
+        injection_rules_path="policies/prompt-injection.yaml",
     )
     gov = GovernanceRegistry.from_config(cfg, AGTBoundary()).build()
     assert gov._timeout == 2.0

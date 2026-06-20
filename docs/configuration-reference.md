@@ -175,6 +175,40 @@ with a changed payload is still caught regardless of the mode/killswitch bucket.
 
 ---
 
+### `injection_rules_path`
+
+Path to the **explicit** prompt-injection rule file (#36), loaded through
+`AGTBoundary` into AGT's `PromptInjectionDetector(injection_config=...)`.
+
+```yaml
+injection_rules_path: policies/prompt-injection.yaml
+```
+
+| Mode | Behaviour |
+|------|-----------|
+| `strict` / `enforce` | **Required.** A missing path, or a file that does not exist / lacks the required `detection_patterns` section, is a startup error (`GovernanceNotConfigured`) — never a silent fall-back to AGT's sample rules. |
+| `shadow` | Optional; if given, still loaded and validated. |
+
+The screen is **mandatory and fail-closed**, folded into the **policy seam**: a hit
+is a *policy* deny. It wraps the engine `_select_engine()` returns, so the
+**primary policy AND the killswitch fallback** are both guarded — engaging the
+killswitch cannot bypass the screen (T1).
+
+Operational properties:
+
+- **D6 no-echo** — a deny names the offending **field**, the injection type, and the
+  threat level only; never the raw payload, matched patterns, or decoded bytes.
+- **Strict projection** — the payload is projected with strict `json.dumps` (no
+  `default=str`), so an attacker-controlled `__str__` is never invoked; a
+  non-JSON-native leaf fails closed.
+- **Bounded executor** — small fields scan inline (skip the thread-hop on voice
+  payloads); larger ones offload to a **dedicated** bounded `ThreadPoolExecutor` (a
+  scan storm cannot starve the shared default pool); oversized fields are **denied
+  unscanned**.
+- A forced detector fault propagates and fails closed (system deny → `GovernanceError`).
+
+---
+
 ## Environment Variables
 
 ### `ZEMTIK_AUDIT_SECRET`
@@ -211,6 +245,7 @@ class GovernanceConfig:
     decision_budget_seconds: float | None = 5.0
     idempotency_max_entries: int = 10000
     idempotency_ttl_seconds: float | None = 3600.0
+    injection_rules_path: str | None = None
 ```
 
 ### `classmethod load(path: str | Path) → GovernanceConfig`

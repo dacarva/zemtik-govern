@@ -41,6 +41,21 @@ rules:
 # Alternatively, load rules from a directory of policy files instead of inline:
 # policy_dir: ./policies
 
+# Explicit prompt-injection rule file (#36). MANDATORY in strict/enforce modes:
+# the wrapper refuses to start without it rather than ship AGT's sample rules
+# (GovernanceNotConfigured). The screen wraps the SELECTED policy engine — primary
+# AND killswitch fallback — so an injection cannot slip through during a killswitch
+# emergency. A hit is a policy deny that names the offending FIELD only (never the
+# raw payload). Shadow mode may omit it. See policies/prompt-injection.yaml.
+injection_rules_path: policies/prompt-injection.yaml
+
+# Bounded idempotency caches (#35). The decision ledger and the proxy effect-dedup
+# slots share ONE bounded LRU+TTL cache, so unique-key traffic cannot grow them
+# without bound and a stale decision expires + re-evaluates. Defaults: 10000
+# entries, 3600s TTL. Set ttl to null for no expiry (LRU-only).
+idempotency_max_entries: 10000
+idempotency_ttl_seconds: 3600.0
+
 # Per-call decision budget, in SECONDS, for the identity + policy path. A breach
 # fails closed (audited system error; the tool never runs), never an implicit
 # allow. Defaults to 5.0; lower it on latency-sensitive (e.g. voice) paths. Set to

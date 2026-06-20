@@ -80,6 +80,12 @@ class GovernanceConfig:
     # later same-key request re-evaluates rather than replaying a stale verdict.
     idempotency_max_entries: int = _DEFAULT_IDEM_MAX_ENTRIES
     idempotency_ttl_seconds: float | None = _DEFAULT_IDEM_TTL_SECONDS
+    # Path to the EXPLICIT prompt-injection rule file (#36). Mandatory in
+    # non-shadow modes: the registry refuses to wire a governor without it rather
+    # than ship AGT's sample rules. The presence requirement is enforced at wiring
+    # time (registry.from_config), where the file is actually loaded and a missing
+    # or malformed file becomes a fail-closed GovernanceNotConfigured.
+    injection_rules_path: str | None = None
 
     def __post_init__(self) -> None:
         """Validate the config, raising :class:`GovernanceNotConfigured` on any insecure shape.
@@ -212,6 +218,12 @@ class GovernanceConfig:
                 "config 'idempotency_ttl_seconds' must be a number of seconds or null, "
                 f"got {type(ttl).__name__}"
             )
+        injection_rules_path = data.get("injection_rules_path")
+        if injection_rules_path is not None and not isinstance(injection_rules_path, str):
+            raise GovernanceNotConfigured(
+                "config 'injection_rules_path' must be a string path or null, "
+                f"got {type(injection_rules_path).__name__}"
+            )
         return cls(
             mode=str(data.get("mode", "strict")),
             rules=tuple(rules),
@@ -220,6 +232,7 @@ class GovernanceConfig:
             decision_budget_seconds=budget,
             idempotency_max_entries=cap,
             idempotency_ttl_seconds=ttl,
+            injection_rules_path=injection_rules_path,
         )
 
     @classmethod

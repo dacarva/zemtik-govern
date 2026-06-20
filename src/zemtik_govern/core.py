@@ -23,6 +23,7 @@ from typing import Any
 from ._cache import BoundedTTLDict
 from .context import GovernanceContext
 from .errors import GovernanceDenied, GovernanceError
+from .injection import GuardedEngine, InjectionClassifier
 from .protocols import (
     AuditEntry,
     AuditSink,
@@ -171,6 +172,7 @@ class ZemtikGovern:
         idem_max_entries: int = _DEFAULT_IDEM_MAX_ENTRIES,
         idem_ttl_seconds: float | None = _DEFAULT_IDEM_TTL_SECONDS,
         time_fn: Callable[[], float] = time.monotonic,
+        injection_classifier: InjectionClassifier | None = None,
     ) -> None:
         """
         Args:
@@ -198,6 +200,12 @@ class ZemtikGovern:
         # caller indefinitely. A timeout is a system fault, so it flows through the
         # same fail-closed path as any other engine error: audited, then denied.
         self._timeout = timeout
+        # Mandatory, fail-closed prompt-injection guard (#36). When wired, it wraps
+        # whatever _select_engine() returns — primary AND killswitch fallback — so
+        # the screen cannot be bypassed during a killswitch emergency (T1). None
+        # only in hand-built cores with no injection concern; from_config always
+        # wires it in non-shadow modes.
+        self._injection_classifier = injection_classifier
         # Idempotency replay guard. A duplicate idempotency_key must resolve to the
         # SAME decision it did the first time — a replayed fintech write is not a
         # new request. The lock serialises same-key calls so two concurrent
@@ -506,8 +514,15 @@ class ZemtikGovern:
                 raise GovernanceError(
                     "kill-switch engaged with no governed fallback; refusing to allow-all"
                 )
-            return self._fallback
-        return self._policy
+            engine: PolicyEngine = self._fallback
+        else:
+            engine = self._policy
+        # Wrap the SELECTED engine so the injection screen guards primary AND
+        # fallback alike (#36, T1). The guard presents as a PolicyEngine, so an
+        # injection hit is a policy deny folded into this seam (P2).
+        if self._injection_classifier is not None:
+            return GuardedEngine(engine, self._injection_classifier)
+        return engine
 
     # NOTE: the decision→audit-vocabulary mapping that used to live here as
     # _entry() now lives on AuditEntry.from_decision — audit language stays in the

@@ -388,7 +388,8 @@ async def test_merkle_chain_verifies_after_crash_recovery_from_file_sink(
     monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "crash-secret")
     audit_file = tmp_path / "audit.jsonl"
     cfg = GovernanceConfig(
-        mode="strict", rules=[_ALLOW_TOOL_RUN], audit_sink=str(audit_file)
+        mode="strict", rules=[_ALLOW_TOOL_RUN], audit_sink=str(audit_file),
+        injection_rules_path="policies/prompt-injection.yaml",
     )
 
     # original process: record an allow and a deny, then "crash" (drop everything)

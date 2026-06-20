@@ -93,12 +93,18 @@ class AGTBoundary:
         # (and so pin assertion runs before any AGT code is touched).
         from agent_os.policies import PolicyDocument as _PolicyDocument
         from agent_os.policies import PolicyEvaluator as _PolicyEvaluator
+        from agent_os.prompt_injection import PromptInjectionDetector as _Detector
+        from agent_os.prompt_injection import (
+            load_prompt_injection_config as _load_injection_config,
+        )
         from agentmesh.governance import FileAuditSink as _FileAuditSink
         from agentmesh.governance.audit import AuditLog as _AuditLog
         from agentmesh.identity import AgentDID as _AgentDID
 
         self._PolicyEvaluator = _PolicyEvaluator
         self._PolicyDocument = _PolicyDocument
+        self._Detector = _Detector
+        self._load_injection_config = _load_injection_config
         self._AuditLog = _AuditLog
         self._FileAuditSink = _FileAuditSink
         self._AgentDID = _AgentDID
@@ -130,6 +136,48 @@ class AGTBoundary:
         not tamper-evident. The caller (registry) sources it and fails closed if
         absent."""
         return self._FileAuditSink(path, secret_key)
+
+    # --- prompt-injection concern (agent_os) ---
+    def prompt_injection_detector(self, rules_path: str):
+        """Build an AGT ``PromptInjectionDetector`` from an EXPLICIT rule file.
+
+        The rule set is loaded via ``load_prompt_injection_config`` and passed as
+        ``injection_config=`` so the detector uses our pinned patterns, NOT AGT's
+        sample defaults (which would only emit a ``UserWarning``). A missing or
+        malformed file raises ``FileNotFoundError`` / ``ValueError`` — the caller
+        (registry) turns either into a fail-closed ``GovernanceNotConfigured`` at
+        startup, never a silent fall-back to sample rules. Detection is pure, so
+        one detector is built once and reused (see the spike findings)."""
+        config = self._load_injection_config(rules_path)
+        return self._Detector(injection_config=config)
+
+    def screen_text(
+        self, detector, text: str, source: str
+    ) -> tuple[bool, str | None, str | None]:
+        """Run one ``detect`` and return ONLY the no-echo-safe verdict facts:
+        ``(is_injection, injection_type, threat_level)`` as plain strings. The
+        detector's internal ``audit_log`` (an unbounded ``list``) is cleared after
+        every call so a long-lived reused detector cannot leak memory — we keep our
+        own audit seam. D6: ``matched_patterns`` / ``explanation`` (which can echo
+        the attacker payload) are deliberately NOT returned."""
+        result = detector.detect(text, source=source)
+        # Keep the detector's internal audit trail flat: it appends one record per
+        # detect (``audit_log`` is a read-only copy property; the real store is the
+        # private ``_audit_log`` deque). We have our own audit seam and never read
+        # it, so clear it after every call rather than let it ride to its cap.
+        try:
+            detector._audit_log.clear()
+        except AttributeError:
+            pass
+        injection_type = (
+            result.injection_type.value
+            if result.injection_type is not None
+            else None
+        )
+        threat_level = (
+            result.threat_level.value if result.threat_level is not None else None
+        )
+        return bool(result.is_injection), injection_type, threat_level
 
     # --- identity concern (agentmesh) ---
     def mint_did(self, unique_id: str) -> str:
