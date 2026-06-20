@@ -188,3 +188,125 @@ async def test_both_phase_audit_trails_verify_integrity(tmp_path, monkeypatch):
     for audit in (shadow_audit, enforce_audit):
         ok, err = audit.verify_integrity()
         assert ok, err
+
+
+# --- Slice 6: orchestration + helpers (demo plumbing must hold its contract) ---
+
+
+def test_build_audit_requires_hmac_secret_in_env(tmp_path, monkeypatch):
+    """The file audit sink refuses to build without an HMAC secret in the
+    environment — same fail-closed contract the registry enforces. A checked-in
+    or absent secret is a system error, never a silently unsigned trail."""
+    monkeypatch.delenv("ZEMTIK_AUDIT_SECRET", raising=False)
+    boundary = dc.AGTBoundary()
+
+    with pytest.raises(GovernanceError, match="HMAC secret"):
+        dc._build_audit(boundary, tmp_path / "no-secret.jsonl")
+
+
+def test_kind_classifies_reads_writes_and_unknown_actions():
+    """``_kind`` is the report's documentation lookup: it labels each known call
+    site read/write and returns ``unknown`` for any action the demo never
+    declared — so a stray action in the report can't masquerade as governed."""
+    assert dc._kind("read_account") == "read"
+    assert dc._kind("transfer_funds") == "write"
+    assert dc._kind("not_a_real_action") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_killswitch_revert_probe_reports_all_three_guarantees(tmp_path, monkeypatch):
+    """The probe is the demo's proof bundle for the kill-switch: the new policy
+    blocks the write, engaging reverts to the prior governed path (write allowed
+    again), and engaging with no fallback fails closed. All three must be True."""
+    monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "dogfood-test-secret")
+
+    probe = await dc._killswitch_revert_probe(tmp_path / "ks-probe.jsonl")
+
+    assert probe["new_policy_blocks_write"] is True
+    assert probe["reverted_to_prior_path_allows"] is True
+    assert probe["no_fallback_fails_closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_render_report_passes_when_every_guarantee_holds(tmp_path, monkeypatch):
+    """With healthy phase results and a clean probe, the rendered report verdicts
+    PASS and the markdown surfaces the per-call-site table plus the kill-switch
+    and integrity sections an operator reads to sign off the cutover."""
+    monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "dogfood-test-secret")
+    shadow_gov, _, _ = dc.build_governor(tmp_path / "s.jsonl", mode="shadow")
+    enforce_gov, _, _ = dc.build_governor(tmp_path / "e.jsonl", mode="enforce")
+    shadow = await dc.run_phase(shadow_gov, mode="shadow")
+    enforce = await dc.run_phase(enforce_gov, mode="enforce")
+    ks_probe = await dc._killswitch_revert_probe(tmp_path / "k.jsonl")
+
+    report, passed = dc._render_report(shadow, enforce, ks_probe, True, True)
+
+    assert passed is True
+    assert "## Verdict: PASS ✅" in report
+    assert "`transfer_funds`" in report  # the write rows are in the table
+    assert "Kill-switch revert" in report
+
+
+def test_render_report_fails_when_audit_integrity_breaks():
+    """If a trail fails to verify, the report verdict is FAIL even when every
+    policy decision was correct — integrity is a gating guarantee, not advisory.
+    Uses synthetic SiteResults so no governor wiring is needed for the assertion."""
+    shadow = [dc.SiteResult("read_account", allowed=True, ran=True)]
+    enforce = [dc.SiteResult("read_account", allowed=True, ran=True)]
+    healthy_probe = {
+        "new_policy_blocks_write": True,
+        "reverted_to_prior_path_allows": True,
+        "no_fallback_fails_closed": True,
+    }
+
+    report, passed = dc._render_report(shadow, enforce, healthy_probe, True, False)
+
+    assert passed is False
+    assert "## Verdict: FAIL ❌" in report
+
+
+def test_render_report_fails_if_a_safe_read_is_denied():
+    """Verdict parity + writes-blocked is not enough: a deny-all policy would
+    satisfy both. The report must FAIL if a safe read did not run under enforce,
+    so 'zero false-denies' proves the safe path stayed open, not that the policy
+    blocked everything."""
+    healthy_probe = {
+        "new_policy_blocks_write": True,
+        "reverted_to_prior_path_allows": True,
+        "no_fallback_fails_closed": True,
+    }
+    # Pathological: the read was denied (false-deny on the safe path). Shadow and
+    # enforce still agree (parity holds) and the write is blocked — yet this must
+    # NOT pass, because a real read got wrongly denied.
+    shadow = [
+        dc.SiteResult("read_account", allowed=False, ran=True),
+        dc.SiteResult("transfer_funds", allowed=False, ran=True),
+    ]
+    enforce = [
+        dc.SiteResult("read_account", allowed=False, ran=False),
+        dc.SiteResult("transfer_funds", allowed=False, ran=False),
+    ]
+
+    _, passed = dc._render_report(shadow, enforce, healthy_probe, True, True)
+
+    assert passed is False  # reads_allowed guard catches the false-deny
+
+
+@pytest.mark.asyncio
+async def test_main_runs_both_phases_and_writes_a_passing_report(tmp_path, monkeypatch):
+    """``main`` is the runnable entry point: it clears prior trails, drives both
+    phases plus the kill-switch probe, verifies both trails, writes the report,
+    and returns 0 on a clean cutover. Trails and report are redirected to a temp
+    dir so the demo's contract is exercised without touching the repo."""
+    monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "dogfood-test-secret")
+    monkeypatch.setattr(dc, "REPO_ROOT", tmp_path)  # main() prints REPORT_MD.relative_to(REPO_ROOT)
+    monkeypatch.setattr(dc, "SHADOW_TRAIL", tmp_path / "shadow.jsonl")
+    monkeypatch.setattr(dc, "ENFORCE_TRAIL", tmp_path / "enforce.jsonl")
+    monkeypatch.setattr(dc, "KILLSWITCH_TRAIL", tmp_path / "ks.jsonl")
+    monkeypatch.setattr(dc, "REPORT_MD", tmp_path / "report.md")
+
+    rc = await dc.main()
+
+    assert rc == 0
+    assert (tmp_path / "report.md").exists()
+    assert "PASS ✅" in (tmp_path / "report.md").read_text(encoding="utf-8")

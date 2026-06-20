@@ -228,9 +228,16 @@ def _render_report(shadow, enforce, ks_probe, shadow_ok, enforce_ok) -> tuple[st
         (r.action, r.allowed) for r in enforce
     }
     writes_blocked = all(not r.ran for r in enforce if _kind(r.action) == "write")
+    # Parity alone is not the proof: a deny-all policy would match shadow to
+    # enforce AND block every write. Assert the reads actually run under enforce
+    # so "zero false-denies" means the safe path stayed open, not that nothing ran.
+    reads_allowed = all(
+        r.allowed and r.ran for r in enforce if _kind(r.action) == "read"
+    )
     passed = (
         verdicts_match
         and writes_blocked
+        and reads_allowed
         and shadow_ok
         and enforce_ok
         and ks_probe["new_policy_blocks_write"]
@@ -254,6 +261,7 @@ def _render_report(shadow, enforce, ks_probe, shadow_ok, enforce_ok) -> tuple[st
           f"{'yes' if r.ran else 'no'} | {'yes' if e.ran else 'no'} |")
     w("")
     w(f"- Verdicts identical across phases (zero false-denies): **{verdicts_match}**")
+    w(f"- Safe reads stay open under enforce (not a deny-all): **{reads_allowed}**")
     w(f"- Privileged writes blocked under enforce: **{writes_blocked}**\n")
 
     w("## Kill-switch revert\n")
