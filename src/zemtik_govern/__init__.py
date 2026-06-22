@@ -12,7 +12,7 @@ __version__ = "0.1.0.dev0"
 
 from ._agt import AGTBoundary, AGTVersionError
 from .audit import AgentMeshAudit
-from .config import GovernanceConfig
+from .config import GovernanceConfig, RailConfig
 from .context import GovernanceContext
 from .core import Killswitch, ZemtikGovern
 from .errors import (
@@ -20,8 +20,10 @@ from .errors import (
     GovernanceDenied,
     GovernanceError,
     GovernanceNotConfigured,
+    OutputGovernanceDenied,
 )
 from .identity import AgentRef, StaticIdentity
+from .output import OutputClassifier, OutputVerdict, RegexPIIClassifier
 from .policy import AgentOsPolicy
 from .protocols import (
     AuditEntry,
@@ -51,7 +53,12 @@ __all__ = [
     "GovernanceRegistry",
     "IdentityProvider",
     "Killswitch",
+    "OutputClassifier",
+    "OutputGovernanceDenied",
+    "OutputVerdict",
     "PolicyEngine",
+    "RailConfig",
+    "RegexPIIClassifier",
     "StaticIdentity",
     "ZemtikGovern",
 ]

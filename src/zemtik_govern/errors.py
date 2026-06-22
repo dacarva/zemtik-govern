@@ -121,6 +121,33 @@ class DecisionBudgetExceeded(GovernanceError):
         super().__init__(message, audit_id=audit_id)
 
 
+class OutputGovernanceDenied(GovernanceError):
+    """An output rail tripped on a READ-classified tool's return value: the value
+    is withheld and this is raised in its place. A fail-closed output deny — the
+    tool already ran (the design's output-deny asymmetry), but the offending value
+    never reaches the caller.
+
+    Catchable by ``code == "output_denied"`` (D8). ``rail`` names the firing rail
+    and the message names the config knob to tune it (mirroring
+    :class:`DecisionBudgetExceeded`); ``audit_id`` back-links to the
+    ``output_denied_raised`` audit row. No raw output is ever echoed (D6).
+    """
+
+    code = "output_denied"
+    guard = "output"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        rail: str | None = None,
+        code: str | None = None,
+        audit_id: str | None = None,
+    ) -> None:
+        self.rail = rail
+        super().__init__(message, code=code, guard="output", audit_id=audit_id)
+
+
 class GovernanceNotConfigured(GovernanceError):
     """The wrapper was asked to start in an insecure configuration (strict mode
     with zero rules, no audit sink). Raised at startup, not request time."""

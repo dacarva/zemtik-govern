@@ -50,15 +50,27 @@ class GovernanceRegistry:
         # operator asked for it.
         self._injection_mode: str = "enforce"
         self._budget_mode: str = "enforce"
+        # Output-governance seam (#39). Empty until from_config builds the rails;
+        # an empty classifier list leaves the seam inert (proxy returns the raw
+        # value). The io map classifies each action read|write for the seam.
+        self._output_classifiers: list[Any] = []
+        self._tool_io_map: dict[str, str] = {}
 
-    def register_guard_modes(
-        self, injection_mode: str, budget_mode: str
-    ) -> GovernanceRegistry:
+    def register_guard_modes(self, injection_mode: str, budget_mode: str) -> GovernanceRegistry:
         """The per-guard stances (``enforce|shadow``) carried into
         ``ZemtikGovern``. Validated at config time; recorded here so ``build()``
         threads them rather than silently enforcing."""
         self._injection_mode = injection_mode
         self._budget_mode = budget_mode
+        return self
+
+    def register_output_seam(
+        self, classifiers: list[Any], tool_io_map: dict[str, str]
+    ) -> GovernanceRegistry:
+        """The output-rail classifiers and the read/write io map carried into
+        ``ZemtikGovern``. An empty classifier list leaves the seam inert."""
+        self._output_classifiers = classifiers
+        self._tool_io_map = tool_io_map
         return self
 
     def register_injection_classifier(self, impl: Any) -> GovernanceRegistry:
@@ -79,9 +91,7 @@ class GovernanceRegistry:
         self._idem_ttl_set = True
         return self
 
-    def register_decision_budget(
-        self, seconds: float | None
-    ) -> GovernanceRegistry:
+    def register_decision_budget(self, seconds: float | None) -> GovernanceRegistry:
         """The per-call decision budget (seconds) carried into ``ZemtikGovern(
         timeout=)``. ``None`` leaves the path unbounded (opt-out). Validated at
         config time; recorded here so ``build()`` threads it rather than silently
@@ -127,9 +137,7 @@ class GovernanceRegistry:
             if seam is None
         ]
         if missing:
-            raise GovernanceNotConfigured(
-                f"registry missing seam(s): {', '.join(missing)}"
-            )
+            raise GovernanceNotConfigured(f"registry missing seam(s): {', '.join(missing)}")
         # Only override the core's cache defaults when from_config supplied them;
         # the raw builder leaves them untouched (matching the core default).
         extra: dict[str, Any] = {}
@@ -139,6 +147,9 @@ class GovernanceRegistry:
             extra["idem_ttl_seconds"] = self._idem_ttl_seconds
         if self._injection_classifier is not None:
             extra["injection_classifier"] = self._injection_classifier
+        if self._output_classifiers:
+            extra["output_classifiers"] = self._output_classifiers
+            extra["tool_io_map"] = self._tool_io_map
         return ZemtikGovern(
             identity=self._identity,  # type: ignore[arg-type]
             policy=self._policy,  # type: ignore[arg-type]
@@ -151,9 +162,7 @@ class GovernanceRegistry:
         )
 
     @classmethod
-    def from_config(
-        cls, config: GovernanceConfig, boundary: AGTBoundary
-    ) -> GovernanceRegistry:
+    def from_config(cls, config: GovernanceConfig, boundary: AGTBoundary) -> GovernanceRegistry:
         """Wire the v0.1 default seams from a validated config + AGT boundary:
         StaticIdentity, deny-by-default AgentOsPolicy, Merkle-chained AgentMeshAudit.
         """
@@ -186,6 +195,7 @@ class GovernanceRegistry:
         # Empty rules only reaches here in shadow mode; strict/enforce reject it
         # at config time, so the None (no PolicyDocument) path is not a missed deny.
         rules = list(config.rules) or None
+        output_classifiers, tool_io_map = cls._build_output_seam(config)
         return (
             cls()
             .register_mode(config.mode)
@@ -195,12 +205,34 @@ class GovernanceRegistry:
                 config.idempotency_max_entries, config.idempotency_ttl_seconds
             )
             .register_identity(StaticIdentity(boundary))
-            .register_policy(
-                AgentOsPolicy(boundary, rules=rules, root_dir=config.policy_dir)
-            )
+            .register_policy(AgentOsPolicy(boundary, rules=rules, root_dir=config.policy_dir))
             .register_audit(audit)
             .register_injection_classifier(classifier)
+            .register_output_seam(output_classifiers, tool_io_map)
         )
+
+    @staticmethod
+    def _build_output_seam(config: GovernanceConfig):
+        """Build the C0 output-rail classifiers from config, fail-closed (#39).
+
+        Returns ``([], {})`` when ``output_screening`` is off so the seam stays
+        inert. Otherwise each configured rail is resolved to its concrete
+        classifier; an unknown rail is a startup error (``GovernanceNotConfigured``)
+        — never a silently-skipped rail that leaves output unscreened. The
+        ``tool_io_map`` is carried through verbatim (already validated by config)."""
+        if not config.output_screening:
+            return [], {}
+        from .output import build_output_classifier
+
+        classifiers = []
+        for rail in config.rails:
+            try:
+                classifiers.append(
+                    build_output_classifier(rail.name, threshold=rail.threshold, mode=rail.mode)
+                )
+            except ValueError as exc:
+                raise GovernanceNotConfigured(str(exc)) from exc
+        return classifiers, dict(config.tool_io_map)
 
     # Modes that must NOT run without an explicit injection rule set.
     _SHADOW_MODE = "shadow"

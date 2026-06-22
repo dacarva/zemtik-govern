@@ -85,6 +85,57 @@ class AuditEntry:
     idempotency_key: str | None = None
     ts: str | None = None
 
+    # Output-seam event vocabulary (#39, DX-renamed D6): the three outcomes the
+    # output rail can record, each carrying the caller-effect mapping that
+    # ``audit_id`` exists to make obvious. ``would_deny`` is the observe-only
+    # shadow outcome (the rail matched but did not enforce).
+    _OUTPUT_EVENTS = {
+        "allowed": ("output_allowed", "output_allowed", "output clean"),
+        "denied_raised": (
+            "output_denied_raised",
+            "output_denied",
+            "output denied by rail {rail!r}",
+        ),
+        "would_deny": (
+            "output_would_deny",
+            "output_would_deny",
+            "output WOULD deny by rail {rail!r} (shadow)",
+        ),
+    }
+
+    @classmethod
+    def from_output(
+        cls,
+        ctx: GovernanceContext,
+        agent_did: str,
+        *,
+        event: str,
+        rail: str | None = None,
+        mode: str | None = None,
+    ) -> AuditEntry:
+        """Map an OUTPUT-screen outcome into the audit vocabulary (#39).
+
+        Distinct from :meth:`from_decision` (which models the input-time
+        allow/deny): output events get their own ``event_type`` /``outcome``
+        (``output_allowed`` / ``output_denied_raised`` / ``output_would_deny``) so
+        the trail names the caller-effect mapping that ``audit_id`` exists to make
+        obvious. The ``rail`` that fired is folded into ``policy_decision`` (no raw
+        output — D6). The write-deny ``output_denied_redacted`` event is the #40
+        path. ``event`` is one of ``allowed`` / ``denied_raised`` / ``would_deny``.
+        """
+        event_type, outcome, decision_template = cls._OUTPUT_EVENTS[event]
+        return cls(
+            event_type=event_type,
+            agent_did=agent_did,
+            action=ctx.action,
+            outcome=outcome,
+            policy_decision=decision_template.format(rail=rail),
+            mode=mode,
+            payload=ctx.payload,
+            idempotency_key=ctx.idempotency_key,
+            ts=ctx.ts,
+        )
+
     @classmethod
     def from_decision(
         cls,
