@@ -269,6 +269,16 @@ class ZemtikGovern:
         # classifiers => the seam is inert and proxy() returns the raw value.
         self._output_classifiers = list(output_classifiers or [])
         self._tool_io_map = dict(tool_io_map or {})
+        # Warn-once registry for unmapped actions (Issue #42). When the output seam
+        # is active and _screen_output sees an action absent from _tool_io_map, it
+        # must warn ONCE — an action that silently defaults to write (fail-closed) is
+        # a MISCLASSIFIED tool waiting to be caught. But repeating the same warning
+        # on every call creates alert fatigue that operators learn to ignore. One
+        # warning per novel action is the right trust signal: it fires immediately on
+        # the first real call (when the operator can still fix the map before prod)
+        # and stays silent thereafter. asyncio is single-threaded so a plain set is
+        # safe without a lock.
+        self._output_warned_actions: set[str] = set()
         # The injected clock, reused by the budget guard to measure elapsed time
         # for a breach (and for a shadow-mode would-breach observation).
         self._time_fn = time_fn
@@ -334,6 +344,22 @@ class ZemtikGovern:
             idem_max_entries,
             idem_ttl_seconds,
         )
+        if self._output_classifiers:
+            # Surface each rail's name; per-rail mode shown alongside the global
+            # mode in the banner so an operator sees shadow vs. enforce per rail.
+            rail_names = ", ".join(getattr(c, "name", "?") for c in self._output_classifiers)
+            # io_map lists explicitly classified actions; every unmapped action defaults
+            # to write (fail-closed). Both facts are surfaced here so an operator can
+            # spot a READ tool that was forgotten from the map before it ships and
+            # silently produces RedactedOutput in production.
+            io_map_repr = "{" + ", ".join(f"{k}: {v}" for k, v in self._tool_io_map.items()) + "}"
+            _LOG.info(
+                "output screening: ON (rails=%s, mode=%s) | "
+                "io_map=%s | unmapped actions default to write (fail-closed)",
+                rail_names,
+                self._mode,
+                io_map_repr,
+            )
 
     async def govern(self, ctx: GovernanceContext) -> Decision:
         """Public entry point: identity → policy → audit, returns the Decision.
@@ -726,6 +752,23 @@ class ZemtikGovern:
         if not self._output_classifiers:
             return result
         global_shadow = self._mode == _SHADOW
+        # Warn-once for actions absent from _tool_io_map (Issue #42). An action not
+        # in the map silently defaults to write (fail-closed), which is the right
+        # security posture — but a READ tool the operator forgot to classify becomes
+        # a write tool, and its PII output will be silently redacted (RedactedOutput)
+        # in production rather than being caught and fixed at development time. The
+        # warn fires on the FIRST call for each novel unmapped action so the operator
+        # sees it immediately in dev/staging logs, before it ships. Subsequent calls
+        # for the SAME action are silent (alert fatigue defeats the purpose). A plain
+        # set is safe because asyncio is single-threaded.
+        if ctx.action not in self._tool_io_map and ctx.action not in self._output_warned_actions:
+            self._output_warned_actions.add(ctx.action)
+            _LOG.warning(
+                "output seam: action %r is unmapped in tool_io_map — "
+                "defaulting to write (fail-closed). Add it to tool_io_map "
+                "to suppress this warning and confirm the classification.",
+                ctx.action,
+            )
         io = resolve_io(self._tool_io_map, ctx.action)
         try:
             text = extract_text(result)

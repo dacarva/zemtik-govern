@@ -8,6 +8,7 @@ slices (write-deny + RedactedOutput, unwrap, shadow) build on.
 """
 
 import asyncio
+import logging
 import time
 
 import pytest
@@ -588,3 +589,84 @@ async def test_rail_fault_on_read_tool_raises_fail_closed():
         await proxy()
     assert exc.value.rail == "rail_fault"
 
+
+# --- Issue #42: Output-seam discoverability: startup banner + warn-once ----------
+
+
+def test_output_seam_enabled_logs_screening_on_at_construction(caplog):
+    """Building a governor with output_classifiers wired logs 'output screening: ON'
+    containing the rail name(s) and mode so an operator sees the active rails at
+    startup (D4/D7 discoverability pattern)."""
+    with caplog.at_level(logging.INFO, logger="zemtik_govern"):
+        gov = _gov(
+            output_classifiers=[RegexPIIClassifier()],
+            tool_io_map={"db.read": "read"},
+        )
+    assert "output screening: ON" in caplog.text
+    assert "pii" in caplog.text  # rail name surfaced
+
+
+def test_output_seam_banner_surfaces_io_map_and_fail_closed_default(caplog):
+    """The construction banner announces both:
+    1. The classified tool_io_map so operators know which actions are explicitly
+       declared (e.g. io_map={db.read: read}).
+    2. That every unmapped action defaults to 'write' (fail-closed) — so the
+       operator sees the security posture, not just the happy-path listing."""
+    with caplog.at_level(logging.INFO, logger="zemtik_govern"):
+        gov = _gov(
+            output_classifiers=[RegexPIIClassifier()],
+            tool_io_map={"db.read": "read"},
+        )
+    assert "io_map=" in caplog.text
+    assert "unmapped" in caplog.text.lower() or "default" in caplog.text.lower()
+
+
+@pytest.mark.asyncio
+async def test_unmapped_action_warns_once_then_silent(caplog):
+    """First call to an unmapped action emits exactly ONE WARNING naming the action
+    and the fail-closed default; a second call to the SAME action emits NO further
+    warning. A DIFFERENT unmapped action warns on its own first call."""
+    gov = _gov(
+        output_classifiers=[RegexPIIClassifier()],
+        tool_io_map={"db.read": "read"},
+    )
+    proxy_email = gov.proxy(lambda: "clean output", action="send.email", subject="a")
+    proxy_sms = gov.proxy(lambda: "clean output", action="send.sms", subject="a")
+
+    with caplog.at_level(logging.WARNING, logger="zemtik_govern"):
+        await proxy_email()  # first call -> warns about send.email
+        await proxy_email()  # second call -> NO further warn for send.email
+        await proxy_sms()    # first call for different action -> warns about send.sms
+
+    email_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "send.email" in r.message
+        and "unmapped" in r.message.lower()
+    ]
+    sms_warnings = [
+        r for r in caplog.records
+        if r.levelno == logging.WARNING
+        and "send.sms" in r.message
+        and "unmapped" in r.message.lower()
+    ]
+    assert len(email_warnings) == 1, f"expected 1 send.email warning, got {len(email_warnings)}"
+    assert len(sms_warnings) == 1, f"expected 1 send.sms warning, got {len(sms_warnings)}"
+
+
+@pytest.mark.asyncio
+async def test_output_seam_disabled_no_banner_and_no_warn(caplog):
+    """When output_classifiers is empty (seam disabled):
+    - No 'output screening' line at construction.
+    - No unmapped-action warning at call time even for unmapped actions."""
+    with caplog.at_level(logging.INFO, logger="zemtik_govern"):
+        gov = _gov()  # no output_classifiers
+
+    assert "output screening" not in caplog.text
+
+    proxy = gov.proxy(lambda: "clean output", action="send.email", subject="a")
+    caplog.clear()
+    with caplog.at_level(logging.WARNING, logger="zemtik_govern"):
+        await proxy()
+
+    assert "unmapped" not in caplog.text.lower()
