@@ -209,6 +209,45 @@ Operational properties:
 
 ---
 
+### `injection.mode` / `budget.mode` (per-guard shadow)
+
+Scope the shadow stance to ONE guard (D10) — the observe-then-enforce upgrade
+path. Independent of the global `mode`: even in `enforce` you can run a *new* guard
+in `shadow` for one release, watch the would-denies in the log, then flip it on.
+
+```yaml
+injection:
+  mode: shadow          # observe injection would-denies; do NOT block yet
+  confidence_floor: 0.0 # reserved paranoid dial; off by default (see below)
+budget:
+  mode: enforce         # block on a budget breach (the default)
+```
+
+Flat keys (`injection_mode: shadow`, `budget_mode: enforce`) are also accepted.
+
+| Field | Values | Default | Behaviour |
+|-------|--------|---------|-----------|
+| `injection.mode` | `enforce` \| `shadow` | `enforce` | `shadow`: an injection hit is logged as a would-deny (field only, no payload echo) but the request still reaches the inner engine. |
+| `budget.mode` | `enforce` \| `shadow` | `enforce` | `shadow`: a budget breach is logged as a would-breach but the engine result is used — no fail-closed deny while observing. |
+
+A typo'd stance (`injection.mode: loose`) is a startup error
+(`GovernanceNotConfigured`), not a silent fall-through.
+
+### `injection_confidence_floor`
+
+```yaml
+injection_confidence_floor: 0.0   # off by default
+```
+
+A paranoid-mode dial, **off by default** (`0.0` = every detection counts).
+Reserved: the shipped AGT screen does not yet surface a per-detection confidence
+to compare against, so a non-zero floor is validated (must be in `[0.0, 1.0]`) and
+documented but is **not yet load-bearing**. The name and the off-by-default
+contract are stable now so a future paranoid-mode release does not change config
+shape. Also accepted nested as `injection: {confidence_floor: …}`.
+
+---
+
 ## Environment Variables
 
 ### `ZEMTIK_AUDIT_SECRET`
@@ -246,6 +285,9 @@ class GovernanceConfig:
     idempotency_max_entries: int = 10000
     idempotency_ttl_seconds: float | None = 3600.0
     injection_rules_path: str | None = None
+    injection_mode: str = "enforce"          # per-guard shadow (D10)
+    budget_mode: str = "enforce"             # per-guard shadow (D10)
+    injection_confidence_floor: float = 0.0  # reserved; off by default (D5)
 ```
 
 ### `classmethod load(path: str | Path) → GovernanceConfig`

@@ -219,6 +219,78 @@ rules: [...]      # updated after shadow observation
 Restart the process. Denials are now enforced — `GovernanceDenied` is raised and
 tools are blocked.
 
+### Per-guard shadow (observe one guard at a time)
+
+The global `mode` flips ALL enforcement at once. To roll out a *single* new guard
+without putting the whole governor in shadow, use the per-guard stance (D10):
+
+```yaml
+mode: enforce          # the rest of the governor still enforces
+injection:
+  mode: shadow         # observe injection would-denies for one release
+budget:
+  mode: enforce
+```
+
+A would-deny is logged (field only, no payload echo) as
+`injection WOULD deny (shadow): …`; a would-breach as
+`decision budget WOULD breach (shadow): …`. Watch those for a release, then flip
+the guard's `mode` to `enforce`.
+
+---
+
+## Upgrading to fail-closed defaults
+
+As of the security-hardening release, a config-built governor in `strict`/`enforce`
+mode runs with fail-closed defaults ON. An upgrade that previously started may now
+raise `GovernanceNotConfigured` at startup — by design. Three things to check:
+
+1. **Injection rules are mandatory in non-shadow modes.** Add
+   `injection_rules_path: policies/prompt-injection.yaml` (or your own rule file).
+   To stage it, run the guard in `injection: {mode: shadow}` for one release first
+   (see "Per-guard shadow" above), then flip to enforce.
+2. **The decision budget defaults to 5.0s.** It is unit-suffixed
+   (`decision_budget_seconds`) — seconds, not ms. Lower it on latency-sensitive
+   paths, or set it to `null` to opt out when an upstream caller enforces its own
+   deadline. A breach raises `DecisionBudgetExceeded` (`code ==
+   "decision_budget_exceeded"`), never an implicit allow.
+3. **Confirm what activated** via the one-line startup log (logger
+   `zemtik_govern`, INFO):
+
+   ```
+   zemtik-govern active | mode: enforce | injection detection: ON (AGT, enforce) | decision budget: 5.0s (enforce) | idempotency: cap=10000 ttl=3600.0
+   ```
+
+---
+
+## Correlating logs to the audit trail
+
+Every governance outcome carries one audit id, exposed the same way whether the
+call was allowed or blocked (D9):
+
+- **Allowed:** `decision.audit_id` (the public alias for `audit_event_id`).
+- **Blocked:** the raised exception's `.audit_id` — `GovernanceDenied`,
+  `DecisionBudgetExceeded`, and any `GovernanceError` from the keyed path all carry
+  it. `None` only when the failure preceded any audit write.
+
+Log the id on every governed call, then look the event up in the trail:
+
+```python
+try:
+    decision = await gov.govern(ctx)
+    log.info("governed", action=ctx.action, audit_id=decision.audit_id,
+             code=None, replayed=decision.replayed)
+except GovernanceError as e:
+    log.warning("blocked", action=ctx.action, audit_id=e.audit_id, code=e.code,
+                guard=e.guard)
+    # later: auditor pulls the exact row
+    #   proof = audit.get_proof(e.audit_id)
+
+```
+
+Because the same id rides both the result and the exception, a log line and the
+tamper-evident Merkle row line up without guesswork.
+
 ---
 
 ## Monitoring
