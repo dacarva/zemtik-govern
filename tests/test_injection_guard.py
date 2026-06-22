@@ -20,7 +20,7 @@ import pytest
 from zemtik_govern._agt import AGTBoundary
 from zemtik_govern.context import GovernanceContext
 from zemtik_govern.core import Killswitch, ZemtikGovern
-from zemtik_govern.errors import GovernanceDenied, GovernanceError, GovernanceNotConfigured
+from zemtik_govern.errors import GovernanceDenied, GovernanceError
 from zemtik_govern.identity import AgentRef
 from zemtik_govern.injection import (
     _MAX_PAYLOAD_DEPTH,
