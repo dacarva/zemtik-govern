@@ -14,15 +14,17 @@ uv pip install -e ".[dev]"
 
 | Demo | What it proves | Extra deps |
 |------|----------------|------------|
-| `qa_demo.py` | Three-seam pipeline scenarios S1–S10 (allow, deny, fail-closed, idempotency) | none |
+| `qa_demo.py` | Three-seam scenarios S1–S15 (allow, deny, fail-closed, idempotency, injection guard, decision budget, error codes/audit_id, per-guard shadow) | none |
 | `auditor.py` | Durable audit trail: verify Merkle/HMAC, extract inclusion proofs, detect tampering | none |
 | `dogfood_cutover.py` | Staged cutover of a fintech agent: shadow → enforce, kill-switch revert, audit integrity | none |
 | `e2e_openai_governed.py` | A real `gpt-5.4-nano` agent governed through `GovernedToolNode` against a mock bank DB | `[langchain]`, `[openai]`, OpenAI key |
 
 ## qa_demo.py — three-seam scenarios
 
-Walks scenarios S1–S10 mapping to the guarantees in
-[`docs/architecture.md`](architecture.md). Each prints PASS for a green run.
+Walks scenarios S1–S15 mapping to the guarantees in
+[`docs/architecture.md`](architecture.md): S1–S10 cover the three-seam core;
+S11–S15 cover the v0.3.0.0 hardening (injection guard, decision budget, error
+codes/audit_id, per-guard shadow). Each prints PASS for a green run.
 
 ```bash
 ZEMTIK_AUDIT_SECRET=qa-test-secret python sandbox/qa_demo.py

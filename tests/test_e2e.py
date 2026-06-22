@@ -69,7 +69,8 @@ async def test_e2e_identity_stamps_agent_did_on_durable_audit(tmp_path, monkeypa
     monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "s6-secret")
     audit_file = tmp_path / "audit.jsonl"
     cfg = GovernanceConfig(
-        mode="strict", rules=[_ALLOW_TOOL_RUN], audit_sink=str(audit_file)
+        mode="strict", rules=[_ALLOW_TOOL_RUN], audit_sink=str(audit_file),
+        injection_rules_path="policies/prompt-injection.yaml",
     )
     boundary = AGTBoundary()
     gov = GovernanceRegistry.from_config(cfg, boundary).build()
@@ -158,7 +159,8 @@ async def test_e2e_durable_file_audit_sink_writes_and_verifies(tmp_path, monkeyp
     monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "e2e-secret")
     audit_file = tmp_path / "audit.jsonl"
     cfg = GovernanceConfig(
-        mode="strict", rules=[_ALLOW_TOOL_RUN], audit_sink=str(audit_file)
+        mode="strict", rules=[_ALLOW_TOOL_RUN], audit_sink=str(audit_file),
+        injection_rules_path="policies/prompt-injection.yaml",
     )
     boundary = AGTBoundary()
     gov = GovernanceRegistry.from_config(cfg, boundary).build()

@@ -9,11 +9,14 @@ half-wired governor that quietly skips a concern at request time.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import logging
+from typing import TYPE_CHECKING, Any
 
 from .core import ZemtikGovern
 from .errors import GovernanceNotConfigured
 from .protocols import AuditSink, IdentityProvider, PolicyEngine
+
+_LOG = logging.getLogger("zemtik_govern")
 
 if TYPE_CHECKING:
     from ._agt import AGTBoundary
@@ -29,6 +32,62 @@ class GovernanceRegistry:
         self._policy: PolicyEngine | None = None
         self._audit: AuditSink | None = None
         self._mode: str = "enforce"
+        # Per-call decision budget (seconds) for identity + policy. None until set
+        # so the raw builder matches the core default; from_config threads the
+        # config's (non-None) decision_budget_seconds so a config-built governor is
+        # never silently unbounded (#33).
+        self._decision_budget_seconds: float | None = None
+        # Bounded idempotency cache controls (#35). None until set so the raw
+        # builder defers to the core defaults; from_config threads the validated
+        # config values so a config-built governor's caches are bounded.
+        self._idem_max_entries: int | None = None
+        self._idem_ttl_seconds: float | None = None
+        self._idem_ttl_set: bool = False
+        # Mandatory injection classifier in non-shadow modes (#36); None until wired.
+        self._injection_classifier: Any | None = None
+        # Per-guard stance (D10). Default enforce (the secure default); from_config
+        # threads the validated config values so a guard runs shadow only when the
+        # operator asked for it.
+        self._injection_mode: str = "enforce"
+        self._budget_mode: str = "enforce"
+
+    def register_guard_modes(
+        self, injection_mode: str, budget_mode: str
+    ) -> GovernanceRegistry:
+        """The per-guard stances (``enforce|shadow``) carried into
+        ``ZemtikGovern``. Validated at config time; recorded here so ``build()``
+        threads them rather than silently enforcing."""
+        self._injection_mode = injection_mode
+        self._budget_mode = budget_mode
+        return self
+
+    def register_injection_classifier(self, impl: Any) -> GovernanceRegistry:
+        """The prompt-injection classifier carried into ``ZemtikGovern(
+        injection_classifier=)``. Wrapped around the selected engine so primary and
+        fallback are both guarded."""
+        self._injection_classifier = impl
+        return self
+
+    def register_idempotency_caps(
+        self, max_entries: int, ttl_seconds: float | None
+    ) -> GovernanceRegistry:
+        """The bounded-cache cap and TTL carried into ``ZemtikGovern``. Validated at
+        config time; recorded here so ``build()`` threads them rather than silently
+        defaulting."""
+        self._idem_max_entries = max_entries
+        self._idem_ttl_seconds = ttl_seconds
+        self._idem_ttl_set = True
+        return self
+
+    def register_decision_budget(
+        self, seconds: float | None
+    ) -> GovernanceRegistry:
+        """The per-call decision budget (seconds) carried into ``ZemtikGovern(
+        timeout=)``. ``None`` leaves the path unbounded (opt-out). Validated at
+        config time; recorded here so ``build()`` threads it rather than silently
+        defaulting to no budget."""
+        self._decision_budget_seconds = seconds
+        return self
 
     def register_mode(self, mode: str) -> GovernanceRegistry:
         """The operational mode (``shadow``/``enforce``/``strict``) the built core
@@ -71,11 +130,24 @@ class GovernanceRegistry:
             raise GovernanceNotConfigured(
                 f"registry missing seam(s): {', '.join(missing)}"
             )
+        # Only override the core's cache defaults when from_config supplied them;
+        # the raw builder leaves them untouched (matching the core default).
+        extra: dict[str, Any] = {}
+        if self._idem_max_entries is not None:
+            extra["idem_max_entries"] = self._idem_max_entries
+        if self._idem_ttl_set:
+            extra["idem_ttl_seconds"] = self._idem_ttl_seconds
+        if self._injection_classifier is not None:
+            extra["injection_classifier"] = self._injection_classifier
         return ZemtikGovern(
             identity=self._identity,  # type: ignore[arg-type]
             policy=self._policy,  # type: ignore[arg-type]
             audit=self._audit,  # type: ignore[arg-type]
             mode=self._mode,
+            timeout=self._decision_budget_seconds,
+            injection_mode=self._injection_mode,
+            budget_mode=self._budget_mode,
+            **extra,
         )
 
     @classmethod
@@ -94,18 +166,72 @@ class GovernanceRegistry:
         # config errors should surface before any AGT object is constructed.
         audit = cls._build_audit(config, boundary)
 
+        # Build the mandatory injection classifier (#36, T3). A non-shadow governor
+        # MUST ship explicit rules — refusing sample coverage is the security
+        # stance, mirroring the AGT-pins / audit-secret boot-time contract.
+        classifier = cls._build_injection_classifier(config, boundary)
+
+        # The confidence floor (D5/Q2) is a reserved paranoid-mode dial: validated
+        # but not yet load-bearing (the shipped AGT screen exposes no per-detection
+        # confidence). Make the inert-ness visible at BOOT, not only in docs, so an
+        # operator who set a non-zero floor expecting fewer denies sees that it has
+        # no runtime effect rather than silently getting full enforcement.
+        if config.injection_confidence_floor > 0.0:
+            _LOG.warning(
+                "injection_confidence_floor=%s is set but reserved (not yet "
+                "load-bearing); detections are not filtered by confidence",
+                config.injection_confidence_floor,
+            )
+
         # Empty rules only reaches here in shadow mode; strict/enforce reject it
         # at config time, so the None (no PolicyDocument) path is not a missed deny.
         rules = list(config.rules) or None
         return (
             cls()
             .register_mode(config.mode)
+            .register_guard_modes(config.injection_mode, config.budget_mode)
+            .register_decision_budget(config.decision_budget_seconds)
+            .register_idempotency_caps(
+                config.idempotency_max_entries, config.idempotency_ttl_seconds
+            )
             .register_identity(StaticIdentity(boundary))
             .register_policy(
                 AgentOsPolicy(boundary, rules=rules, root_dir=config.policy_dir)
             )
             .register_audit(audit)
+            .register_injection_classifier(classifier)
         )
+
+    # Modes that must NOT run without an explicit injection rule set.
+    _SHADOW_MODE = "shadow"
+
+    @staticmethod
+    def _build_injection_classifier(config: GovernanceConfig, boundary: AGTBoundary):
+        """Build the AGT-backed injection classifier, fail-closed (#36).
+
+        Non-shadow modes always wire a mandatory injection guard. With no
+        ``injection_rules_path`` the guard uses AGT's own vetted
+        ``PromptInjectionConfig()`` defaults, passed EXPLICITLY — this is not the
+        sample-rule fall-back (that path is the bare detector, which warns); the
+        rules track the pinned AGT wheel with no in-repo file to maintain. Supply a
+        path only to pin a version or diverge; a file that does not exist / lacks
+        the required sections is then a startup error (``GovernanceNotConfigured``).
+        Shadow mode (observe-only) may omit the guard entirely; a path is still
+        wired and validated if given."""
+        from .injection import AgtInjectionClassifier
+
+        path = config.injection_rules_path
+        if not path:
+            if config.mode == GovernanceRegistry._SHADOW_MODE:
+                return None
+            # AGT's vetted defaults, explicit and warning-free — no sample fallback.
+            return AgtInjectionClassifier(boundary)
+        try:
+            return AgtInjectionClassifier(boundary, path)
+        except (FileNotFoundError, ValueError) as exc:
+            raise GovernanceNotConfigured(
+                f"injection_rules_path {path!r} could not be loaded: {exc}"
+            ) from exc
 
     # The HMAC signing key for a file audit sink is read from the environment,
     # never the config file — a signing secret does not belong in checked-in YAML.

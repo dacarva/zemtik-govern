@@ -265,16 +265,74 @@ class MyIdentity:
         return AgentRef(did=did)
 ```
 
+### Swapping the injection classifier
+
+The injection screen is a pluggable seam: `InjectionClassifier` is a Protocol, and
+the shipped `AgtInjectionClassifier` is just the default. To run your own detector
+(a hosted model, a regex pack, a different vendor), implement `screen` and pass the
+instance to `ZemtikGovern(injection_classifier=…)` — it wraps the SELECTED engine,
+so your classifier guards the primary policy AND the killswitch fallback alike.
+
+```python
+from zemtik_govern.injection import InjectionVerdict
+from zemtik_govern.context import GovernanceContext
+
+
+class MyClassifier:
+    """Any object with this async `screen` satisfies InjectionClassifier."""
+
+    async def screen(self, ctx: GovernanceContext) -> InjectionVerdict:
+        for field, value in ctx.payload.items():
+            if await my_detector.is_injection(value):
+                # D6 no-echo: name the FIELD, never the raw payload text.
+                return InjectionVerdict(
+                    is_injection=True,
+                    field=str(field),
+                    injection_type="custom",
+                    threat_level="high",
+                )
+        return InjectionVerdict(is_injection=False, reason="clean")
+
+
+gov = ZemtikGovern(
+    identity=my_identity,
+    policy=my_policy,
+    audit=my_audit,
+    injection_classifier=MyClassifier(),   # swapped in
+    # injection_mode="shadow",  # optional: observe would-denies before enforcing
+)
+```
+
+On construction the governor logs one line naming the active guards (logger
+`zemtik_govern`, INFO) — look for `injection detection: ON (AGT, enforce)` (or your
+classifier) to confirm the swap took. The `injection_confidence_floor` config dial
+is **off by default** (`0.0`) and reserved; see the configuration reference.
+
 ---
 
 ## Error Handling Reference
 
-| Exception | Meaning | Tool ran? |
-|-----------|---------|-----------|
-| `GovernanceDenied` | Policy denied the action. `.decision` has the reason. | No |
-| `GovernanceError` | System fault in a seam. | No |
-| `GovernanceNotConfigured` | Bad startup config or missing seam. Fix before retry. | No |
-| `AGTVersionError` | AGT pin mismatch. Fix environment before retry. | No |
+Every governance exception subclasses `GovernanceError` and carries a stable
+`.code` (branch on it, never on the message) and an `.audit_id` that matches the
+written audit row (and `Decision.audit_id` on an allowed result).
+
+| Exception | `.code` | Meaning | Tool ran? |
+|-----------|---------|---------|-----------|
+| `GovernanceDenied` | `policy_denied` / `system_denied` | Policy (or fail-closed system) deny. `.decision` has the reason; `.guard` mirrors `denial_kind`. | No |
+| `DecisionBudgetExceeded` | `decision_budget_exceeded` | Identity+policy did not resolve in time. `.limit_seconds` / `.elapsed_seconds`; `.guard == "budget"`. | No |
+| `GovernanceError` | `idempotency_conflict`, `idempotency_fingerprint_error`, `engine_error`, `governance_error` | System fault in a seam (idempotency key reuse, unserialisable payload, engine failure). | No |
+| `GovernanceNotConfigured` | `not_configured` | Bad startup config or missing seam. Fix before retry. | No |
+| `AGTVersionError` | — | AGT pin mismatch. Fix environment before retry. | No |
+
+```python
+try:
+    decision = await gov.govern(ctx)
+except GovernanceError as e:
+    if e.code == "decision_budget_exceeded":
+        metrics.budget_breach(e.limit_seconds, e.elapsed_seconds)
+    log.warning("blocked", code=e.code, guard=e.guard, audit_id=e.audit_id)
+    raise
+```
 
 All governance exceptions mean the tool **did not run**.
 

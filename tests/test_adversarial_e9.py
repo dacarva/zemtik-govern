@@ -184,7 +184,8 @@ async def test_recovered_trail_detects_a_tampered_entry(tmp_path, monkeypatch):
     monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "tamper-secret")
     audit_file = tmp_path / "audit.jsonl"
     cfg = GovernanceConfig(
-        mode="strict", rules=[_ALLOW_TOOL_RUN], audit_sink=str(audit_file)
+        mode="strict", rules=[_ALLOW_TOOL_RUN], audit_sink=str(audit_file),
+        injection_rules_path="policies/prompt-injection.yaml",
     )
 
     gov = GovernanceRegistry.from_config(cfg, AGTBoundary()).build()

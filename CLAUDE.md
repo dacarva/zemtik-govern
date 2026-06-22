@@ -27,6 +27,9 @@ pytest tests/test_core.py::test_govern_order -v
 # Run a test module
 pytest tests/test_adversarial.py -v
 
+# Run the end-to-end sandbox suite (real seams, real file audit; slower I/O)
+pytest tests/e2e -v
+
 # Lint (gates CI)
 ruff check src/
 

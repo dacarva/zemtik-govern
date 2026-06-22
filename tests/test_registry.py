@@ -71,6 +71,7 @@ async def test_from_config_wires_a_governing_core():
             }
         ],
         audit_sink="memory",
+        injection_rules_path="policies/prompt-injection.yaml",
     )
     gov = GovernanceRegistry.from_config(cfg, boundary).build()
 
@@ -111,6 +112,7 @@ async def test_from_config_fails_closed_when_engine_errors(monkeypatch):
             }
         ],
         audit_sink="memory",
+        injection_rules_path="policies/prompt-injection.yaml",
     )
     gov = GovernanceRegistry.from_config(cfg, boundary).build()
 
@@ -139,7 +141,8 @@ async def test_from_config_wires_file_audit_sink(tmp_path, monkeypatch):
     monkeypatch.setenv("ZEMTIK_AUDIT_SECRET", "test-secret")
     audit_file = tmp_path / "audit.jsonl"
     cfg = GovernanceConfig(
-        mode="strict", rules=[_RULE], audit_sink=str(audit_file)
+        mode="strict", rules=[_RULE], audit_sink=str(audit_file),
+        injection_rules_path="policies/prompt-injection.yaml",
     )
     gov = GovernanceRegistry.from_config(cfg, AGTBoundary()).build()
 

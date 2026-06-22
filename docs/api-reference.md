@@ -171,7 +171,15 @@ class Decision:
     policy_version: str | None     # reserved — always None in v0.1
     audit_event_id: str | None     # set by govern() after audit.write()
     replayed: bool                 # True when served from the idempotency ledger
+
+    @property
+    def audit_id(self) -> str | None: ...   # public alias for audit_event_id (D9)
 ```
+
+**`Decision.audit_id`** — the public, guard-agnostic name for `audit_event_id`.
+The SAME id rides a raised exception's `.audit_id`, so an allowed result and a
+blocked one correlate to the audit trail identically. See `docs/operations.md`
+("Correlating logs to the audit trail").
 
 **`Decision.replayed`** — direct `govern()` / `govern_sync()` callers **must**
 check this before executing their own side effects:
@@ -421,22 +429,27 @@ for mode/sink/policy-source checks.
 ## Errors
 
 All errors subclass `GovernanceError`. When any of these is raised, the guarded
-tool **did not run**.
+tool **did not run**. Every instance carries a stable `.code` (branch on it, not
+on the message), an optional `.guard`, and an `.audit_id` that matches the written
+audit row.
 
-| Exception | Meaning |
-|-----------|---------|
-| `GovernanceError` | Base class; system fault in a seam. |
-| `GovernanceDenied(decision)` | Policy denied the action. Carries `.decision` for forensics. |
-| `GovernanceNotConfigured` | Insecure startup config or missing seam. Raised at boot. |
-| `AGTVersionError` | AGT distribution pin mismatch. Raised at `AGTBoundary()` construction. |
+| Exception | `.code` | Meaning |
+|-----------|---------|---------|
+| `GovernanceError` | `governance_error`, `engine_error`, `idempotency_conflict`, `idempotency_fingerprint_error` | Base class; system fault in a seam (engine failure, idempotency key reuse, unserialisable payload). |
+| `GovernanceDenied(decision)` | `policy_denied` / `system_denied` | Policy (or fail-closed system) deny. Carries `.decision`; `.guard` mirrors `denial_kind`. |
+| `DecisionBudgetExceeded` | `decision_budget_exceeded` | Identity+policy did not resolve in time. Carries `.limit_seconds` / `.elapsed_seconds`; `.guard == "budget"`. |
+| `GovernanceNotConfigured` | `not_configured` | Insecure startup config or missing seam. Raised at boot. |
+| `AGTVersionError` | — | AGT distribution pin mismatch. Raised at `AGTBoundary()` construction. |
 
 ```python
 try:
     decision = await gov.govern(ctx)
 except GovernanceDenied as exc:
     # policy said no; exc.decision has the rule/reason
-    log.warning("denied: %s", exc.decision.reason)
-except GovernanceError:
-    # system fault; tool was blocked; investigate the audit trail
+    log.warning("denied: %s code=%s audit_id=%s", exc.decision.reason, exc.code, exc.audit_id)
+except GovernanceError as exc:
+    # system fault; tool was blocked; branch on the stable code, not the message
+    if exc.code == "decision_budget_exceeded":
+        metrics.budget_breach(exc.limit_seconds, exc.elapsed_seconds)
     raise
 ```

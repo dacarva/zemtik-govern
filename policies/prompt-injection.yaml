@@ -1,0 +1,86 @@
+# zemtik-govern — OPTIONAL prompt-injection rule override (#36)
+#
+# You do NOT need this file. By default zemtik-govern builds the injection guard
+# from AGT's own vetted PromptInjectionConfig() defaults, passed explicitly (no
+# in-repo copy, no sample-rule warning, tracks the pinned AGT wheel automatically).
+# Set `injection_rules_path` to this file ONLY when you want to:
+#   1. Pin a version — freeze the exact patterns so an AGT wheel bump (e.g.
+#      3.7.0 -> the consolidated v4.0.0) cannot silently shift what is detected.
+#   2. Diverge — add or remove patterns for your own threat model.
+#
+# The patterns below are a snapshot of AGT agent-os-kernel 3.7.0's defaults, kept
+# as a ready-to-edit starting point. Regenerate after an AGT bump by re-dumping
+# the wheel's defaults, or edit freely to diverge.
+#
+# Format consumed by agent_os.prompt_injection.load_prompt_injection_config:
+# a top-level `detection_patterns` section (required) of regex lists per category.
+detection_patterns:
+  direct_override:
+  - "ignore\\s+(all\\s+)?previous\\s+instructions"
+  - "you\\s+are\\s+now\\b"
+  - "new\\s+role\\s*:"
+  - "forget\\s+(everything|all|your)\\b"
+  - "disregard\\s+(all\\s+)?(above|prior|previous)\\b"
+  - "override\\s+(previous\\s+)?instructions"
+  - "do\\s+not\\s+follow\\s+(your|the)\\s+(previous\\s+)?instructions"
+  delimiter:
+  - "^-{3,}\\s*$"
+  - "^#{3,}\\s*$"
+  - "^```\\s*$"
+  - "END\\s+SYSTEM"
+  - "BEGIN\\s+USER"
+  - "<\\|im_start\\|>"
+  - "<\\|im_end\\|>"
+  - "\\[INST\\]"
+  - "<<SYS>>"
+  - "<\\|system\\|>"
+  - "<\\|user\\|>"
+  - "<\\|assistant\\|>"
+  role_play:
+  - "pretend\\s+you\\s+are"
+  - "act\\s+as\\s+if\\s+you\\s+have\\s+no\\s+restrictions"
+  - "\\bjailbreak\\b"
+  - "\\bDAN\\s+mode\\b"
+  - "developer\\s+mode\\s+override"
+  - "bypass\\s+(all\\s+)?(safety|content)\\s+(filters?|restrictions?)"
+  - "you\\s+have\\s+no\\s+(limitations?|restrictions?|rules?)"
+  context_manipulation:
+  - "the\\s+above\\s+instructions\\s+are\\s+wrong"
+  - "actually\\s+your\\s+real\\s+instructions\\s+are"
+  - "the\\s+developer\\s+told\\s+me\\s+to\\s+tell\\s+you"
+  - "secret\\s+password\\s+is"
+  - "your\\s+true\\s+purpose\\s+is"
+  - "the\\s+real\\s+system\\s+prompt\\s+is"
+  multi_turn:
+  - "as\\s+I\\s+mentioned\\s+before.*you\\s+agreed\\s+to"
+  - "you\\s+already\\s+said\\s+yes"
+  - "continuing\\s+from\\s+where\\s+you\\s+unlocked"
+  - "you\\s+previously\\s+confirmed"
+  - "we\\s+already\\s+established\\s+that\\s+you\\s+can"
+  encoding:
+  - "\\\\x[0-9a-fA-F]{2}(?:\\\\x[0-9a-fA-F]{2}){3,}"
+  - "\\\\u[0-9a-fA-F]{4}(?:\\\\u[0-9a-fA-F]{4}){3,}"
+  - "\\brot13\\b"
+  - "\\bbase64\\s*decode\\b"
+  - "\\bhex\\s*decode\\b"
+  base64_pattern: "[A-Za-z0-9+/]{20,}={0,2}"
+suspicious_decoded_keywords:
+- ignore
+- override
+- system
+- password
+- secret
+- admin
+- root
+- exec
+- eval
+- import os
+sensitivity_thresholds:
+  strict: 0.3
+  balanced: 0.5
+  permissive: 0.7
+sensitivity_min_threat:
+  strict: low
+  balanced: low
+  permissive: high
+disclaimer: "zemtik-govern: AGT agent-os-kernel 3.7.0 default detection rules, pinned verbatim. Deny on match (D6: never echo payload)."
