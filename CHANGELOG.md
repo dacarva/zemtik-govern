@@ -4,6 +4,67 @@ All notable changes to zemtik-govern are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project versions
 via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 
+## [0.3.0.0] - 2026-06-22
+
+### BREAKING
+
+- **Fail-closed defaults are now ON by default.** A config-built governor
+  (`GovernanceRegistry.from_config`) in `strict`/`enforce` mode now REQUIRES an
+  explicit `injection_rules_path` (it refuses to start on AGT sample rules), runs
+  with a **5.0s `decision_budget_seconds`** by default, and bounds both
+  idempotency caches (10000 entries / 3600s TTL). An upgrade that previously
+  started will now raise `GovernanceNotConfigured` at startup if it lacks an
+  injection rule file in a non-shadow mode — this is intentional: the guard you
+  did not know you needed is on, loudly.
+
+  **Migration.** (1) Add `injection_rules_path: policies/prompt-injection.yaml`
+  (or your own rule file) to every non-shadow config, or run the new guard in
+  `injection: {mode: shadow}` for one release to observe would-denies first.
+  (2) If a latency-sensitive path cannot tolerate the 5s budget, set
+  `decision_budget_seconds` explicitly (it is now unit-suffixed — seconds, not
+  ms) or `null` to opt out when an upstream caller enforces its own deadline.
+  (3) Watch for the one-line startup log `zemtik-govern active | … | injection
+  detection: ON (AGT) | …` to confirm what activated. Full notes in
+  `docs/operations.md` ("Upgrading to fail-closed defaults").
+
+### Added
+
+- **AGT-native prompt-injection guard (#36).** A mandatory, fail-closed injection
+  screen folded into the policy seam and wrapped around the SELECTED engine —
+  primary AND killswitch fallback — so it cannot be bypassed during a killswitch
+  emergency. Strict, size-bounded, off-loop projection (an attacker `__str__` is
+  never invoked); a hit is a D6 no-echo policy deny naming the field only. Swap in
+  your own classifier via the `InjectionClassifier` Protocol.
+- **Bounded idempotency caches + two-level keying (#35).** The decision ledger and
+  the proxy effect-dedup slots share ONE bounded LRU+TTL cache, so unique-key
+  traffic cannot grow them without bound and they evict consistently. Replay keys
+  on `(mode, killswitch_state)`; conflict keys on the request fingerprint alone.
+  An in-flight effect future vetoes eviction so a running tool call is never
+  orphaned (incl. across TTL expiry).
+- **Decision-budget deadline race + strict fingerprint (#34/#32).** The per-call
+  budget decides on the timer, not the engine, so a cancel-swallowing engine
+  cannot leak a post-breach allow. The idempotency fingerprint is strict (no
+  `default=str`, `allow_nan=False`, string-only keys, bounded nesting depth), so a
+  stringify collision can never become a false replay.
+- **Catchable governance errors (D8).** Every `GovernanceError` carries a stable
+  `.code` (e.g. `decision_budget_exceeded`, `idempotency_conflict`,
+  `policy_denied`) and an optional `.guard`; the budget breach is its own
+  `DecisionBudgetExceeded` with `.limit_seconds` / `.elapsed_seconds`. Branch on
+  the code, never on a message substring.
+- **Audit correlation (D9).** An allowed `Decision` exposes `.audit_id` and every
+  raised governance exception carries the SAME id, so a log line and the
+  tamper-evident audit row line up. See `docs/operations.md`.
+- **Per-guard shadow modes (D10).** `injection.mode` / `budget.mode` =
+  `enforce|shadow` scope the global shadow machinery to one guard for an
+  observe-then-enforce upgrade — run a new guard in shadow, watch the would-denies,
+  then flip to enforce.
+- **Unit-suffixed config names + reserved confidence floor (D5).**
+  `decision_budget_seconds`, `idempotency_ttl_seconds`, and the off-by-default
+  `injection_confidence_floor` (0.0) are documented in
+  `docs/configuration-reference.md`.
+- **Active-guard startup log (D4/D7)** and an `InjectionClassifier` swap example
+  in `docs/integration-guide.md`.
+
 ## [0.2.0.0] - 2026-06-20
 
 ### Added

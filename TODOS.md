@@ -15,70 +15,7 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   state "reserved; always ``None`` in v0.1" so integrators do not write code
   expecting live data.
 
-## Idempotency / core (S7 hardening)
-
-- **Bound the idempotency ledger**
-  **Priority:** P1
-  `core.py` `_idem_ledger` is an unbounded, process-local `dict` keyed on the
-  caller-supplied `idempotency_key`. Normal unique-key traffic grows it forever
-  (memory leak); a malicious caller streaming unique keys is a DoS. Add an
-  LRU/TTL bound (window-matched, e.g. 24h). Evicting a still-replayable key only
-  costs a deterministic re-evaluation, which is safe. Surfaced by Claude + Codex
-  adversarial review.
-
-- **Per-key idempotency locking**
-  **Priority:** P2
-  `_idem_lock` is one global `asyncio.Lock` held across identity + policy + audit,
-  so every keyed call serialises against every other keyed call (head-of-line
-  blocking on the latency-sensitive path). Lock per key (or an in-flight
-  `dict[str, Future]`) so distinct keys evaluate concurrently and only true
-  duplicates wait. Surfaced by adversarial review.
-
-- **Decision budget is not a hard fail-closed boundary**
-  **Priority:** P2
-  `asyncio.wait_for` cancels the engine coroutine on timeout, but an engine that
-  swallows `CancelledError` can still return a value (verified: a callee catching
-  cancellation returned an allow after the budget). Document the cancellation-
-  safety contract for `identify`/`evaluate`, and/or treat a budget breach as a
-  deny regardless of the coroutine's eventual return. Also: the budget wraps each
-  await separately (identity, then policy) and excludes lock-wait + audit, so
-  total wall-clock can exceed `timeout`. Surfaced by adversarial review.
-  **Documented (2026-06-19)**: `_with_budget` docstring in `core.py` now
-  explains the cancellation-safety assumption and the known limitation. The code
-  issue (an engine swallowing `CancelledError`) is not yet fixed.
-
-- **Replay pins the first decision across mode/killswitch changes**
-  **Priority:** P3
-  A ledgered decision replays under the live `mode`/killswitch, mixing a cached
-  allow/deny with current enforcement — a killswitch engaged after a key is
-  ledgered cannot revert that key. Either key the ledger on
-  `(idempotency_key, mode, killswitch_state)` or document + test the intentional
-  first-decision pinning and re-enforce under the stored mode. Surfaced by
-  adversarial review.
-
 ## Idempotency / core (S6–S7 ship review)
-
-- **Fingerprint rejects ambiguous payloads instead of coercing**
-  **Priority:** P2
-  `_request_fingerprint` serialises with `json.dumps(..., default=str)`. Two
-  distinct non-JSON-native payload values that stringify identically collapse to
-  the same SHA-256, so a key reused with the same action+subject but a different
-  custom-object payload that stringifies the same is replayed as a duplicate
-  rather than detected as a conflict. The *raw-exception* half (an
-  un-serialisable payload escaping the fail-closed boundary) is now fixed —
-  fingerprint failures audit + raise `GovernanceError`. The remaining work is the
-  collision: drop `default=str` for a strict encoder, or validate payloads as
-  JSON-native at `GovernanceContext` construction. Surfaced by security + red-team
-  + Codex review.
-
-- **Wire the decision budget through config/registry**
-  **Priority:** P2
-  `ZemtikGovern(timeout=...)` exists but `GovernanceConfig`/`GovernanceRegistry`
-  never set it, so the default is `None` (no bound) for every config-built
-  governor. Combined with the single global `_idem_lock`, one hung keyed request
-  can stall all keyed governance in-process. Thread a `decision_budget` config
-  field → registry → core so deployments actually get the voice-path bound.
-  Surfaced by Codex review.
 
 - **Cancellation is not audited**
   **Priority:** P3
@@ -207,6 +144,28 @@ Completed at the bottom. Sprint slices S4–S8 live as GitHub issues #4–#8.
   next AGT pin bump; revisit via the conformance gate.
 
 ## Completed
+
+- **Bound the idempotency ledger** (P1) — `BoundedTTLDict` (LRU + lazy TTL) backs
+  both the decision ledger and the proxy effect-dedup slots; an in-flight effect
+  vetoes eviction so a running tool call is never orphaned. **Completed:** v0.3.0.0
+  (2026-06-22) — #35.
+- **Per-key idempotency locking** (P2) — `_idem_locks: dict[str, Lock]` with
+  waiter-count cleanup; distinct keys evaluate concurrently, only true duplicates
+  wait. **Completed:** v0.3.0.0 (2026-06-22) — #34.
+- **Decision budget is not a hard fail-closed boundary** (P2) — `_with_budget` is a
+  deadline race that decides on the timer and never reads a post-breach engine
+  result, so a cancel-swallowing engine cannot leak an allow; raises
+  `DecisionBudgetExceeded`. **Completed:** v0.3.0.0 (2026-06-22) — #34.
+- **Replay pins the first decision across mode/killswitch changes** (P3) — replay
+  keys on `(mode, killswitch_state)`; a key allowed before the killswitch flipped
+  re-evaluates under the fallback. **Completed:** v0.3.0.0 (2026-06-22) — #35.
+- **Fingerprint rejects ambiguous payloads instead of coercing** (P2) — strict
+  `_request_fingerprint` (no `default=str`, `allow_nan=False`, string-only keys,
+  bounded depth); a stringify collision is now an audited conflict, never a false
+  replay. **Completed:** v0.3.0.0 (2026-06-22) — #32.
+- **Wire the decision budget through config/registry** (P2) — `decision_budget_seconds`
+  threaded config → registry → core (default 5.0s); a config-built governor is
+  never silently unbounded. **Completed:** v0.3.0.0 (2026-06-22) — #33.
 
 - **S1: AGT boundary + spike** — pins asserted, compat map + ADR, conformance gate.
 - **S2: Scaffold** — errors, async protocols, frozen context, config + example
