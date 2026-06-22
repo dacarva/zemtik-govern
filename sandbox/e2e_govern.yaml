@@ -8,6 +8,9 @@
 # wrapped tool's .name). See src/zemtik_govern/langchain/tools.py:185.
 mode: enforce
 audit_sink: sandbox/e2e.audit.jsonl
+# enforce/strict modes require an explicit injection rule set (#36): a poisoned
+# tool argument is denied by the guard before policy, never run on AGT samples.
+injection_rules_path: policies/prompt-injection.yaml
 rules:
   - name: allow-get-balance
     condition:
@@ -21,5 +24,13 @@ rules:
       operator: eq
       value: list_accounts
     action: allow
-  # transfer_funds  -> no rule -> DENIED by default
+  - name: allow-search-transactions
+    condition:
+      field: action
+      operator: eq
+      value: search_transactions
+    action: allow
+  # transfer_funds  -> no rule -> DENIED by default (deny-by-default moat)
   # close_account   -> no rule -> DENIED by default
+  # search_transactions IS allowed by policy, but a poisoned `query` argument is
+  # still denied by the prompt-injection guard BEFORE policy (#36).
