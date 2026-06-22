@@ -1,4 +1,4 @@
-# API Reference — zemtik-govern v0.1
+# API Reference — zemtik-govern
 
 All public symbols are exported from `zemtik_govern.__init__`.
 
@@ -76,6 +76,11 @@ beyond the return type.
 
 The returned proxy is async. Callers that go through `proxy()` get
 **effect-idempotency for free** and do not need to check `Decision.replayed`.
+
+When `output_screening` is enabled, the proxy also screens the tool's return: a
+READ action raises `OutputGovernanceDenied` on a rail hit, a WRITE action returns
+a `RedactedOutput` sentinel. Wrap the result in `unwrap()` for a uniform contract.
+See **Output Governance** below.
 
 ---
 
@@ -349,6 +354,76 @@ class AuditRecord:
 
 ---
 
+## Output Governance
+
+The output seam (#39–#43) screens a tool's **return value** after it runs. Opt in
+with `output_screening: true` and classify each action as `read` or `write` via
+`tool_io_map`. Enforcement is asymmetric: a READ-classified tool's offending
+return **raises** `OutputGovernanceDenied` (caller never sees the value); a
+WRITE-classified tool already ran, so `proxy()` **returns** a `RedactedOutput`
+sentinel instead of the value. See `docs/architecture.md` (output seam) and
+`docs/integration-guide.md` (wiring) for the full design.
+
+### `OutputClassifier` (Protocol)
+
+```python
+@runtime_checkable
+class OutputClassifier(Protocol):
+    name: str
+    async def screen(self, text: str, ctx: GovernanceContext) -> OutputVerdict: ...
+```
+
+Screens projected output text for one class of leak. Async so a concrete
+implementation may offload to a thread pool.
+
+### `OutputVerdict`
+
+```python
+@dataclass(frozen=True)
+class OutputVerdict:
+    is_match: bool
+    rail: str | None = None     # the firing rail
+    reason: str | None = None   # safe summary — NEVER the matched text
+```
+
+The no-echo-safe outcome of screening one tool return.
+
+### `RegexPIIClassifier(*, threshold=0.0, mode="enforce")`
+
+The C0 default PII rail and a concrete `OutputClassifier`. Scans output for
+email / SSN / payment-card / phone shapes with linear-time (ReDoS-safe) anchored
+regexes. A regex hit is binary (confidence `1.0`); `mode` is `"enforce"` or
+`"shadow"` (a shadow match is observed but not enforced).
+
+### `RedactedOutput`
+
+```python
+@dataclass(frozen=True)
+class RedactedOutput:
+    audit_id: str
+```
+
+The sentinel `proxy()` returns when a WRITE-classified tool's output trips an
+enforce rail. **Two halves:** SPARE methods (`str`/`repr`/`format`) return the
+marker `"<output redacted: audit_id=…>"` so structured logging never crashes;
+POISON methods (attribute access other than `audit_id`, item access, iteration)
+raise `RedactedOutputAccessError`. Equality is type-only. `audit_id` back-links
+to the `output_denied_redacted` audit row.
+
+### `ZemtikGovern.unwrap(result) → Any`
+
+Collapses the read-deny-raises / write-deny-returns asymmetry into one call.
+Returns `result` unchanged when it is not a `RedactedOutput`; raises
+`OutputGovernanceDenied` (carrying the sentinel's `audit_id`) when it is. Wrap
+every governed result in it for a uniform contract.
+
+```python
+result = await governed_write(...)
+value  = gov.unwrap(result)   # raises if result was redacted
+```
+
+---
+
 ## CLI
 
 ### `zemtik init langchain`
@@ -412,7 +487,27 @@ class GovernanceConfig:
     rules: tuple[dict, ...] = ()
     policy_dir: str | None = None
     audit_sink: str | None = None
+    # Output-governance seam (#39–#43) — opt-in, proxy() only:
+    output_screening: bool = False                 # screen every tool return through the rails
+    tool_io_map: Mapping[str, str] = {}            # action → "read" | "write"
+    rails: tuple[RailConfig, ...] = ()             # per-rail threshold + mode
 ```
+
+See `docs/configuration-reference.md` for the full field list (decision budget,
+idempotency bounds, injection guard, and the output-seam fields) and YAML examples.
+
+### `RailConfig`
+
+```python
+@dataclass(frozen=True)
+class RailConfig:
+    name: str                  # rail to enable; C0 ships "pii"
+    threshold: float = 0.0     # 0.0–1.0 minimum confidence; regex PII rail is binary
+    mode: str = "enforce"      # "enforce" | "shadow" (observe without enforcing)
+```
+
+One output rail's tuning. A typo'd `mode` or out-of-range `threshold` is a
+startup error (fail-closed). See `docs/configuration-reference.md` (`rails`).
 
 #### `classmethod load(path: str | Path) → GovernanceConfig`
 
@@ -438,6 +533,8 @@ audit row.
 | `GovernanceError` | `governance_error`, `engine_error`, `idempotency_conflict`, `idempotency_fingerprint_error` | Base class; system fault in a seam (engine failure, idempotency key reuse, unserialisable payload). |
 | `GovernanceDenied(decision)` | `policy_denied` / `system_denied` | Policy (or fail-closed system) deny. Carries `.decision`; `.guard` mirrors `denial_kind`. |
 | `DecisionBudgetExceeded` | `decision_budget_exceeded` | Identity+policy did not resolve in time. Carries `.limit_seconds` / `.elapsed_seconds`; `.guard == "budget"`. |
+| `OutputGovernanceDenied` | `output_denied` | An output rail tripped on a READ-classified tool's return value; the value is withheld. The tool already ran (output-deny asymmetry). Carries `.rail`; `.guard == "output"`. |
+| `RedactedOutputAccessError` | `output_redacted_access` | A caller tried to read data from a `RedactedOutput` sentinel (a WRITE-classified tool's output was redacted). Carries `.audit_id`; `.guard == "output"`. |
 | `GovernanceNotConfigured` | `not_configured` | Insecure startup config or missing seam. Raised at boot. |
 | `AGTVersionError` | — | AGT distribution pin mismatch. Raised at `AGTBoundary()` construction. |
 
