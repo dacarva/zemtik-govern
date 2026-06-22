@@ -116,16 +116,25 @@ def test_tool_io_map_defaults_unmapped_action_to_write():
 
 @pytest.mark.asyncio
 async def test_write_classified_pii_output_fails_closed_in_this_slice():
-    """An unmapped (=> write) tool whose output trips a rail does NOT leak in this
-    slice: it fails closed by raising. #40 refines the write path to a
-    RedactedOutput sentinel + HIGH-severity audit."""
-    seen = []
-
-    gov = _gov(output_classifiers=[RegexPIIClassifier()])  # no io map => write
+    """Write tool returning PII → returns RedactedOutput (never raises); raw value
+    never leaks to caller; HIGH-severity output_denied_redacted audit row emitted,
+    correlated by audit_id. (#40)"""
+    seams = _Seams()
+    gov = _gov(seams=seams, output_classifiers=[RegexPIIClassifier()])  # no io map => write
     proxy = gov.proxy(lambda: "card holder carol@example.org", action="send.email", subject="a")
-    with pytest.raises(OutputGovernanceDenied):
-        seen.append(await proxy())
-    assert seen == []
+    result = await proxy()
+
+    from zemtik_govern.output import RedactedOutput
+    assert isinstance(result, RedactedOutput)
+    # raw PII never reaches the caller
+    assert "carol@example.org" not in str(result)
+    # HIGH-severity audit row emitted
+    out = seams.entries[-1]
+    assert out.event_type == "output_denied_redacted"
+    assert out.outcome == "output_denied"
+    assert getattr(out, "severity", None) == "HIGH"
+    # correlated by audit_id
+    assert result.audit_id == f"evt-{len(seams.entries)}"
 
 
 @pytest.mark.asyncio
@@ -449,3 +458,133 @@ async def test_per_rail_shadow_observes_without_raising():
     result = await proxy()
     assert result == "pii bob@corp.example"
     assert seams.entries[-1].event_type == "output_would_deny"
+
+
+# --- #40: RedactedOutput sentinel + HIGH-severity audit for write tools ---------
+
+
+@pytest.mark.asyncio
+async def test_redacted_output_frozen_and_isinstance_checkable():
+    """RedactedOutput is frozen (immutable) and isinstance-checkable."""
+    from zemtik_govern.output import RedactedOutput
+    r = RedactedOutput(audit_id="evt-1")
+    assert isinstance(r, RedactedOutput)
+    with pytest.raises((AttributeError, TypeError)):
+        r.audit_id = "mutated"
+
+
+@pytest.mark.asyncio
+async def test_redacted_output_spare_methods_do_not_raise():
+    """str/repr/format/json.dumps(default=str) all return the redaction marker."""
+    import json
+    from zemtik_govern.output import RedactedOutput
+    r = RedactedOutput(audit_id="evt-42")
+    marker = "<output redacted: audit_id=evt-42>"
+    assert str(r) == marker
+    assert repr(r) == marker
+    assert format(r) == marker
+    assert json.dumps(r, default=str) == json.dumps(marker)
+
+
+@pytest.mark.asyncio
+async def test_redacted_output_poison_methods_raise_typed_error():
+    """getattr/getitem/iter/unpack on RedactedOutput raise RedactedOutputAccessError."""
+    from zemtik_govern.errors import RedactedOutputAccessError
+    from zemtik_govern.output import RedactedOutput
+    r = RedactedOutput(audit_id="evt-7")
+    with pytest.raises(RedactedOutputAccessError) as exc:
+        _ = r.some_attribute
+    assert exc.value.audit_id == "evt-7"
+
+    with pytest.raises(RedactedOutputAccessError):
+        _ = r["key"]
+
+    with pytest.raises(RedactedOutputAccessError):
+        for _ in r:
+            pass
+
+
+@pytest.mark.asyncio
+async def test_redacted_output_equality_based_on_type_only():
+    """Two RedactedOutputs with differing audit_ids compare equal."""
+    from zemtik_govern.output import RedactedOutput
+    r1 = RedactedOutput(audit_id="evt-1")
+    r2 = RedactedOutput(audit_id="evt-2")
+    assert r1 == r2
+    assert hash(r1) == hash(r2)
+
+
+@pytest.mark.asyncio
+async def test_keyed_replay_returns_redacted_value_without_rerunning():
+    """Keyed replay on a write tool that returned RedactedOutput: returns the
+    cached RedactedOutput without re-running the tool or re-screening."""
+    from zemtik_govern.output import RedactedOutput
+    seams = _Seams()
+    runs = []
+
+    def tool():
+        runs.append(True)
+        return "card holder carol@example.org"
+
+    gov = _gov(
+        seams=seams,
+        output_classifiers=[RegexPIIClassifier()],
+    )  # no io map => write
+    proxy = gov.proxy(
+        tool, action="send.email", subject="agent-1", context_factory=_keyed_factory("k2", action="send.email")
+    )
+    first = await proxy()
+    second = await proxy()
+
+    assert isinstance(first, RedactedOutput)
+    assert first == second  # same type-equality
+    assert runs == [True]  # tool ran once
+    # Only one output_denied_redacted event (not re-screened on replay)
+    redacted_events = [e for e in seams.entries if e.event_type == "output_denied_redacted"]
+    assert len(redacted_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_rail_fault_on_write_tool_returns_redacted_output():
+    """If classifier.screen() raises on a WRITE tool, return RedactedOutput +
+    HIGH audit with reason rail_fault. Do NOT raise."""
+    from zemtik_govern.output import RedactedOutput
+
+    class FaultingClassifier:
+        name = "faulty"
+        mode = "enforce"
+
+        async def screen(self, text, ctx):
+            raise RuntimeError("rail exploded")
+
+    seams = _Seams()
+    gov = _gov(seams=seams, output_classifiers=[FaultingClassifier()])
+    # no io map => write
+    proxy = gov.proxy(lambda: "some output", action="send.email", subject="a")
+    result = await proxy()
+
+    assert isinstance(result, RedactedOutput)
+    out = seams.entries[-1]
+    assert out.event_type == "output_denied_redacted"
+    assert getattr(out, "severity", None) == "HIGH"
+    assert "rail_fault" in (out.policy_decision or "")
+
+
+@pytest.mark.asyncio
+async def test_rail_fault_on_read_tool_raises_fail_closed():
+    """If classifier.screen() raises on a READ tool, keep failing closed by raising."""
+    from zemtik_govern.errors import OutputGovernanceDenied
+
+    class FaultingClassifier:
+        name = "faulty"
+        mode = "enforce"
+
+        async def screen(self, text, ctx):
+            raise RuntimeError("rail exploded")
+
+    gov = _gov(output_classifiers=[FaultingClassifier()], tool_io_map={"db.read": "read"})
+    proxy = gov.proxy(lambda: "some output", action="db.read", subject="a")
+    with pytest.raises(OutputGovernanceDenied) as exc:
+        await proxy()
+    assert exc.value.rail == "rail_fault"
+

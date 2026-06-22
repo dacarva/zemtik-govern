@@ -84,11 +84,17 @@ class AuditEntry:
     payload: Mapping[str, Any] = field(default_factory=dict)
     idempotency_key: str | None = None
     ts: str | None = None
+    # Severity tag for HIGH-risk output events (#40). ``None`` for ordinary
+    # allow/deny rows; ``"HIGH"`` for the write-deny redaction path and rail
+    # fault events where the exact threat level matters to a SIEM consumer.
+    severity: str | None = None
 
-    # Output-seam event vocabulary (#39, DX-renamed D6): the three outcomes the
-    # output rail can record, each carrying the caller-effect mapping that
+    # Output-seam event vocabulary (#39 / #40, DX-renamed D6): the four outcomes
+    # the output rail can record, each carrying the caller-effect mapping that
     # ``audit_id`` exists to make obvious. ``would_deny`` is the observe-only
-    # shadow outcome (the rail matched but did not enforce).
+    # shadow outcome (the rail matched but did not enforce). ``denied_redacted``
+    # is the #40 write-tool path: the sentinel is returned, the effect already
+    # executed, and a HIGH-severity row is written.
     _OUTPUT_EVENTS = {
         "allowed": ("output_allowed", "output_allowed", "output clean"),
         "denied_raised": (
@@ -101,6 +107,11 @@ class AuditEntry:
             "output_would_deny",
             "output WOULD deny by rail {rail!r} (shadow)",
         ),
+        "denied_redacted": (
+            "output_denied_redacted",
+            "output_denied",
+            "output redacted by rail {rail!r}",
+        ),
     }
 
     @classmethod
@@ -112,16 +123,26 @@ class AuditEntry:
         event: str,
         rail: str | None = None,
         mode: str | None = None,
+        severity: str | None = None,
     ) -> AuditEntry:
-        """Map an OUTPUT-screen outcome into the audit vocabulary (#39).
+        """Map an OUTPUT-screen outcome into the audit vocabulary (#39 / #40).
 
         Distinct from :meth:`from_decision` (which models the input-time
         allow/deny): output events get their own ``event_type`` /``outcome``
-        (``output_allowed`` / ``output_denied_raised`` / ``output_would_deny``) so
-        the trail names the caller-effect mapping that ``audit_id`` exists to make
-        obvious. The ``rail`` that fired is folded into ``policy_decision`` (no raw
-        output — D6). The write-deny ``output_denied_redacted`` event is the #40
-        path. ``event`` is one of ``allowed`` / ``denied_raised`` / ``would_deny``.
+        (``output_allowed`` / ``output_denied_raised`` / ``output_would_deny``
+        / ``output_denied_redacted``) so the trail names the caller-effect
+        mapping that ``audit_id`` exists to make obvious. The ``rail`` that
+        fired is folded into ``policy_decision`` (no raw output — D6).
+
+        ``event`` is one of:
+        - ``"allowed"`` — output was clean
+        - ``"denied_raised"`` — read tool, output denied, exception raised
+        - ``"would_deny"`` — shadow mode, rail matched but not enforced
+        - ``"denied_redacted"`` — write tool (#40), output redacted, sentinel returned
+
+        ``severity`` is ``"HIGH"`` for the ``denied_redacted`` event (and rail
+        fault events) so a SIEM consumer can filter without inspecting
+        ``event_type``.
         """
         event_type, outcome, decision_template = cls._OUTPUT_EVENTS[event]
         return cls(
@@ -134,6 +155,7 @@ class AuditEntry:
             payload=ctx.payload,
             idempotency_key=ctx.idempotency_key,
             ts=ctx.ts,
+            severity=severity,
         )
 
     @classmethod

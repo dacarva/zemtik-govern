@@ -32,6 +32,7 @@ from .errors import (
 from .injection import GuardedEngine, InjectionClassifier
 from .output import (
     IO_READ,
+    IO_WRITE,
     OutputClassifier,
     OutputExtractionError,
     extract_text,
@@ -308,7 +309,18 @@ class ZemtikGovern:
     def _log_active_guards(self, idem_max_entries: int, idem_ttl_seconds: float | None) -> None:
         """Announce the active guards once, at construction (D4/D7). Names whether
         injection detection is ON, the decision budget, and the cache caps — so an
-        upgrade that activates fail-closed defaults is visible, not silent."""
+        upgrade that activates fail-closed defaults is visible, not silent.
+
+        Issue #42 — output seam discoverability: when output classifiers are wired,
+        also announces the active rail names/modes AND the tool_io_map so an operator
+        immediately sees what is classified and what will default to write (fail-closed).
+        The governor has no inventory of every possible action at construction time
+        (proxies are created lazily, and rails are PII classifiers that carry no
+        action names), so listing "unclassified actions" verbatim is not buildable.
+        The faithful, testable equivalent: surface the KNOWN io_map (so the operator
+        sees what IS declared) and state the fail-closed default — unmapped actions
+        default to write — so misclassified tools are caught at operator review time,
+        not silently in production."""
         injection = (
             f"ON (AGT, {self._injection_mode})" if self._injection_classifier is not None else "OFF"
         )
@@ -679,15 +691,28 @@ class ZemtikGovern:
         )
 
     async def _screen_output(self, result: Any, did: str, ctx: GovernanceContext) -> Any:
-        """Screen a tool's return value through the output rails, fail-closed (#39).
+        """Screen a tool's return value through the output rails, fail-closed (#39/#40).
 
         Runs INSIDE proxy()'s effect path so the screened value is what gets cached.
         With no classifiers wired the seam is inert — the raw value passes through.
         Otherwise the value is projected to text (the C0 extraction contract) and
-        each rail screens it. A read-classified ENFORCE hit (or an unscreenable
-        value, or a generator return) withholds the value and raises
+        each rail screens it.
+
+        **Read path (IO_READ, ENFORCE hit):** withhold the value and raise
         :class:`OutputGovernanceDenied`; the error's ``audit_id`` back-links to the
         ``output_denied_raised`` row. An allowed output emits ``output_allowed``.
+
+        **Write path (IO_WRITE, ENFORCE hit, #40):** the side effect already
+        happened (the design's output-deny asymmetry). Instead of raising we:
+        1. Write a HIGH-severity ``output_denied_redacted`` audit row.
+        2. Return a :class:`~zemtik_govern.output.RedactedOutput` sentinel
+           (spare str/repr, poison getattr/iter/getitem) so the offending value
+           never reaches the caller but structured logging never crashes either.
+
+        **Rail fault on write:** if ``classifier.screen()`` itself raises on a
+        WRITE tool, the response is the same as an ENFORCE hit — return
+        ``RedactedOutput`` with ``rail="rail_fault"`` and a HIGH-severity row.
+        On a READ tool a classifier fault re-raises (fail closed).
 
         Shadow (observe-only): when the global mode is ``shadow`` OR a rail's own
         mode is ``shadow``, that rail's match is OBSERVED — an ``output_would_deny``
@@ -696,9 +721,7 @@ class ZemtikGovern:
         ``_enforce`` contract so a whole-governor shadow rollout never hard-blocks.
 
         ``did`` is the identity-resolved subject, threaded from ``govern`` so output
-        rows are attributed to the SAME agent the input row names. The write-deny
-        sentinel (``RedactedOutput``) is the #40 path; here a write ENFORCE hit also
-        fails closed by raising.
+        rows are attributed to the SAME agent the input row names.
         """
         if not self._output_classifiers:
             return result
@@ -723,7 +746,37 @@ class ZemtikGovern:
             ) from exc
         observed_would_deny = False
         for classifier in self._output_classifiers:
-            verdict = await classifier.screen(text, ctx)
+            # --- Rail fault handling: classifier.screen() may itself raise. ----
+            # On a WRITE tool: return RedactedOutput + HIGH audit (same as an
+            # ENFORCE hit) — the side effect already happened and we must never
+            # pass through an unscreened value. On a READ tool: re-raise so the
+            # fail-closed guarantee holds for the read path.
+            try:
+                verdict = await classifier.screen(text, ctx)
+            except Exception as exc:  # noqa: BLE001 — intentional broad catch
+                rail_name = getattr(classifier, "name", "unknown")
+                _LOG.error(
+                    "output rail %r raised during screen(); treating as deny. %s",
+                    rail_name,
+                    exc,
+                )
+                if io == IO_WRITE:
+                    event_id = await self._write_output(
+                        ctx, did, event="denied_redacted", rail="rail_fault", severity="HIGH"
+                    )
+                    from .output import RedactedOutput
+                    return RedactedOutput(audit_id=event_id)
+                # Read tool: re-raise (fail closed).
+                event_id = await self._write_output(
+                    ctx, did, event="denied_raised", rail="rail_fault"
+                )
+                raise OutputGovernanceDenied(
+                    f"output rail {rail_name!r} raised during screening; "
+                    f"blocked fail-closed. {exc}",
+                    rail="rail_fault",
+                    audit_id=event_id,
+                ) from exc
+
             if not verdict.is_match:
                 continue
             rail_shadow = global_shadow or getattr(classifier, "mode", _GUARD_ENFORCE) == _SHADOW
@@ -734,9 +787,12 @@ class ZemtikGovern:
                 _LOG.warning("output rail %r WOULD deny (shadow): %s", verdict.rail, verdict.reason)
                 observed_would_deny = True
                 continue
-            event_id = await self._write_output(ctx, did, event="denied_raised", rail=verdict.rail)
             if io == IO_READ:
-                # No-echo: name the rail + the tunable knob, never the value.
+                # Read path: withhold the value and raise. No-echo: name the
+                # rail + the tunable knob, never the value (D6).
+                event_id = await self._write_output(
+                    ctx, did, event="denied_raised", rail=verdict.rail
+                )
                 raise OutputGovernanceDenied(
                     f"output blocked by the {verdict.rail!r} rail "
                     f"({verdict.reason}); tune it via rails."
@@ -744,16 +800,15 @@ class ZemtikGovern:
                     rail=verdict.rail,
                     audit_id=event_id,
                 )
-            # Write path: the effect already happened (#40 returns a redaction
-            # sentinel + HIGH audit). In this slice we fail closed by raising —
-            # never leak the offending value — pending the sentinel work.
-            raise OutputGovernanceDenied(
-                f"output blocked by the {verdict.rail!r} rail "
-                f"({verdict.reason}) on a write tool; blocked. "
-                "Redaction sentinel for write tools is tracked in #40.",
-                rail=verdict.rail,
-                audit_id=event_id,
+            # Write path (#40): the side effect already happened. Return the
+            # redaction sentinel + write a HIGH-severity audit row. The caller
+            # never receives the offending value (no-echo, D6), and structured
+            # logging (str/repr of the sentinel) never crashes.
+            event_id = await self._write_output(
+                ctx, did, event="denied_redacted", rail=verdict.rail, severity="HIGH"
             )
+            from .output import RedactedOutput
+            return RedactedOutput(audit_id=event_id)
         # No ENFORCE rail fired. Record ``output_allowed`` only when the output was
         # genuinely clean; a shadow-observed would-deny already has its own row.
         if not observed_would_deny:
@@ -761,13 +816,26 @@ class ZemtikGovern:
         return result
 
     async def _write_output(
-        self, ctx: GovernanceContext, did: str, *, event: str, rail: str | None
+        self,
+        ctx: GovernanceContext,
+        did: str,
+        *,
+        event: str,
+        rail: str | None,
+        severity: str | None = None,
     ) -> str:
         """Write one output-seam audit row and return its id so a raised exception
-        correlates to it via ``.audit_id``. ``event`` is ``allowed`` /
-        ``denied_raised`` / ``would_deny`` (the observe-only shadow outcome)."""
+        or a returned sentinel correlates to it via ``.audit_id``.
+
+        ``event`` is one of ``allowed`` / ``denied_raised`` / ``would_deny`` /
+        ``denied_redacted`` (the #40 write-tool path). ``severity`` is ``"HIGH"``
+        for the ``denied_redacted`` and rail-fault events so a SIEM consumer can
+        filter on severity without inspecting ``event_type``.
+        """
         return await self._audit.write(
-            AuditEntry.from_output(ctx, did, event=event, rail=rail, mode=self._mode)
+            AuditEntry.from_output(
+                ctx, did, event=event, rail=rail, mode=self._mode, severity=severity
+            )
         )
 
     def proxy(

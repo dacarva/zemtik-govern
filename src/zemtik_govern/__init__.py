@@ -21,9 +21,10 @@ from .errors import (
     GovernanceError,
     GovernanceNotConfigured,
     OutputGovernanceDenied,
+    RedactedOutputAccessError,
 )
 from .identity import AgentRef, StaticIdentity
-from .output import OutputClassifier, OutputVerdict, RegexPIIClassifier
+from .output import OutputClassifier, OutputVerdict, RedactedOutput, RegexPIIClassifier
 from .policy import AgentOsPolicy
 from .protocols import (
     AuditEntry,
@@ -57,6 +58,8 @@ __all__ = [
     "OutputGovernanceDenied",
     "OutputVerdict",
     "PolicyEngine",
+    "RedactedOutput",
+    "RedactedOutputAccessError",
     "RailConfig",
     "RegexPIIClassifier",
     "StaticIdentity",

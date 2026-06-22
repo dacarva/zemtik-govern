@@ -148,6 +148,42 @@ class OutputGovernanceDenied(GovernanceError):
         super().__init__(message, code=code, guard="output", audit_id=audit_id)
 
 
+class RedactedOutputAccessError(GovernanceError):
+    """Raised when a caller attempts to read data from a
+    :class:`~zemtik_govern.output.RedactedOutput` sentinel — the value was
+    redacted because the write tool's output tripped an output rail, so no
+    caller-readable data survives.
+
+    This is the *poison* half of the sentinel contract: SPARE methods
+    (``str`` / ``repr`` / ``format``) return the redaction marker silently so
+    structured logging never crashes; POISON methods (attribute access, item
+    access, iteration) raise this error so a caller that accidentally tries to
+    use the redacted value is loudly signaled rather than silently receiving an
+    empty or wrong result.
+
+    Catchable by ``code == "output_redacted_access"`` (D8). ``audit_id``
+    back-links to the ``output_denied_redacted`` row written when the sentinel
+    was produced, so the calling code can correlate the attempted access to the
+    original denial without guessing.
+    """
+
+    code = "output_redacted_access"
+    guard = "output"
+
+    def __init__(self, *, audit_id: str | None = None) -> None:
+        message = (
+            "attempted to access a redacted output value"
+            + (f" (audit_id={audit_id!r})" if audit_id is not None else "")
+            + "; the write tool's output was redacted by an output rail — "
+            "check the audit trail for details"
+        )
+        super().__init__(message, audit_id=audit_id)
+        # Expose as a typed attribute so callers can branch on it without
+        # parsing the message string (D8 stable-code pattern). Stored here
+        # because the base class sets self.audit_id in __init__ via super().
+        self.audit_id: str | None = audit_id
+
+
 class GovernanceNotConfigured(GovernanceError):
     """The wrapper was asked to start in an insecure configuration (strict mode
     with zero rules, no audit sink). Raised at startup, not request time."""

@@ -240,6 +240,102 @@ class RegexPIIClassifier:
         return OutputVerdict(is_match=False, rail=self.name, reason="clean")
 
 
+@dataclass(frozen=True)
+class RedactedOutput:
+    """Returned by ``proxy()`` when a WRITE-classified tool's output trips an
+    output rail in ENFORCE mode. The side effect already executed; this is
+    post-hoc scrubbing, not prevention.
+
+    **The sentinel contract — two halves:**
+
+    SPARE (never raises):
+        ``str()``, ``repr()``, ``format()`` return the redaction marker
+        ``"<output redacted: audit_id=…>"`` so structured logging (e.g. JSON
+        serialisers that call ``default=str``) never crashes when they
+        encounter the sentinel.
+
+    POISON (always raises :class:`~zemtik_govern.errors.RedactedOutputAccessError`):
+        Attribute access (other than ``audit_id``), item access (``[]``), and
+        iteration (``for``/``unpack``) raise ``RedactedOutputAccessError``
+        carrying the ``audit_id``. A caller that accidentally tries to *use*
+        the redacted value is loudly signaled rather than silently receiving an
+        empty or wrong result.
+
+    **Equality is type-only:** two ``RedactedOutput`` instances with different
+    ``audit_id`` values compare equal (and hash equal) because the only
+    semantically meaningful fact is that an output was redacted — distinguishing
+    *which* redaction by id would falsely suggest the caller can act on it.
+
+    ``audit_id`` back-links to the ``output_denied_redacted`` audit row (#40)
+    so an operator can correlate a sentinel returned to a caller with the
+    HIGH-severity trail entry written at the moment of redaction (D9).
+    """
+
+    audit_id: str
+
+    # --- SPARE methods: return a safe marker, never raise ---------------------
+
+    def __str__(self) -> str:
+        return f"<output redacted: audit_id={self.audit_id}>"
+
+    def __repr__(self) -> str:
+        return f"<output redacted: audit_id={self.audit_id}>"
+
+    def __format__(self, format_spec: str) -> str:
+        # Honour the spare contract even when a format spec is supplied; the
+        # spec itself is ignored — the caller always gets the marker text.
+        return f"<output redacted: audit_id={self.audit_id}>"
+
+    # --- POISON methods: raise RedactedOutputAccessError ----------------------
+
+    def __getattr__(self, name: str) -> object:
+        # ``__getattr__`` fires ONLY for attributes not found through the normal
+        # lookup chain (i.e. ``__dict__`` / class). On a frozen dataclass,
+        # ``audit_id`` is found via ``__dict__`` so this hook never fires for
+        # it. Any OTHER attribute access — e.g. ``.text``, ``.data``,
+        # ``.content`` — lands here and is poisoned.
+        #
+        # We must NOT access ``self.audit_id`` normally here (that would
+        # recurse back into ``__getattr__`` if the field is not yet set during
+        # ``__init__``). Use ``object.__getattribute__`` to bypass the hook.
+        try:
+            aid = object.__getattribute__(self, "audit_id")
+        except AttributeError:
+            aid = None
+        from .errors import RedactedOutputAccessError
+        raise RedactedOutputAccessError(audit_id=aid)
+
+    def __getitem__(self, key: object) -> object:
+        # Item access (``sentinel["key"]``, ``sentinel[0]``) is poison.
+        try:
+            aid = object.__getattribute__(self, "audit_id")
+        except AttributeError:
+            aid = None
+        from .errors import RedactedOutputAccessError
+        raise RedactedOutputAccessError(audit_id=aid)
+
+    def __iter__(self) -> object:
+        # Iteration (``for x in sentinel`` / unpacking) is poison.
+        try:
+            aid = object.__getattribute__(self, "audit_id")
+        except AttributeError:
+            aid = None
+        from .errors import RedactedOutputAccessError
+        raise RedactedOutputAccessError(audit_id=aid)
+
+    # --- Equality is type-only ------------------------------------------------
+
+    def __eq__(self, other: object) -> bool:
+        # Two sentinels with different audit_ids are still "equal" — the only
+        # semantically meaningful fact is that an output was redacted, not
+        # which one. Callers must not branch on audit_id equality.
+        return isinstance(other, RedactedOutput)
+
+    def __hash__(self) -> int:
+        # Consistent with the type-only equality: all instances share one hash.
+        return hash(RedactedOutput)
+
+
 # C0 ships exactly one output rail. The registry maps a configured rail name to its
 # concrete classifier through this table; a configured rail with no entry is a
 # fail-closed startup error (never a silently-skipped rail). C1 grows this into the
