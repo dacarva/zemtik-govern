@@ -53,6 +53,15 @@ class Decision:
     audit_event_id: str | None = None
     replayed: bool = False  # True when served from the idempotency ledger
 
+    @property
+    def audit_id(self) -> str | None:
+        """The id of the audit row this decision was stamped with — the public,
+        guard-agnostic name for ``audit_event_id`` (D9). The SAME id rides a
+        raised exception's ``.audit_id``, so an allowed result and a blocked one
+        correlate to the trail the same way. ``None`` until the audit write
+        returns (i.e. on a decision not yet through the audit seam)."""
+        return self.audit_event_id
+
 
 @dataclass(frozen=True)
 class AuditEntry:
