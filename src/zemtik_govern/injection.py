@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
@@ -182,6 +183,14 @@ class AgtInjectionClassifier:
         return self._boundary.screen_text(self._detector, text, source=field_name)
 
 
+_INJECTION_ENFORCE = "enforce"
+_INJECTION_SHADOW = "shadow"
+
+# Module logger for the shadow-mode would-deny observation (D10). Named for the
+# package so it shares the operator's existing zemtik-govern log handler.
+_LOG = logging.getLogger("zemtik_govern")
+
+
 class GuardedEngine:
     """Wraps a :class:`PolicyEngine` so every evaluation is injection-screened
     first. An injection hit short-circuits to a POLICY deny (it never reaches the
@@ -189,26 +198,44 @@ class GuardedEngine:
 
     Because the wrap happens around the engine ``_select_engine()`` returns, BOTH
     the primary policy and the killswitch fallback are guarded — the screen cannot
-    be bypassed by engaging the killswitch (T1)."""
+    be bypassed by engaging the killswitch (T1).
+
+    Per-guard shadow (D10): in ``mode == "shadow"`` an injection hit is OBSERVED
+    (the would-deny is logged) but NOT enforced — the payload still delegates to
+    the inner engine. This is the observe-then-enforce upgrade path scoped to the
+    injection guard alone; the would-deny still names the field only (D6), never
+    the raw payload, even in the log."""
 
     def __init__(
-        self, inner: PolicyEngine, classifier: InjectionClassifier
+        self,
+        inner: PolicyEngine,
+        classifier: InjectionClassifier,
+        *,
+        mode: str = _INJECTION_ENFORCE,
     ) -> None:
         self._inner = inner
         self._classifier = classifier
+        self._mode = mode
 
     async def evaluate(self, ctx: GovernanceContext) -> Decision:
         verdict = await self._classifier.screen(ctx)
         if verdict.is_injection:
             # D6 no-echo: name the field + type + threat only; NEVER the payload.
+            reason = (
+                f"prompt injection detected in field {verdict.field!r} "
+                f"(type={verdict.injection_type}, threat={verdict.threat_level})"
+            )
+            if self._mode == _INJECTION_SHADOW:
+                # Observe-only: record the would-deny (no payload echo) and let the
+                # request through to the inner engine. The operator watches these
+                # for a release, then flips injection.mode to enforce.
+                _LOG.warning("injection WOULD deny (shadow): %s", reason)
+                return await self._inner.evaluate(ctx)
             return Decision(
                 allowed=False,
                 action="deny",
                 matched_rule=None,
-                reason=(
-                    f"prompt injection detected in field {verdict.field!r} "
-                    f"(type={verdict.injection_type}, threat={verdict.threat_level})"
-                ),
+                reason=reason,
                 denial_kind="policy",
             )
         return await self._inner.evaluate(ctx)

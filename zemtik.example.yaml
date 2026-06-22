@@ -49,6 +49,16 @@ rules:
 # raw payload). Shadow mode may omit it. See policies/prompt-injection.yaml.
 injection_rules_path: policies/prompt-injection.yaml
 
+# Per-guard stance (D10). Scope shadow to ONE guard for an observe-then-enforce
+# upgrade: run a new guard in `shadow` for a release to watch would-denies in the
+# log, then flip to `enforce`. Independent of the global `mode` above. Both default
+# to `enforce`. Flat keys (injection_mode / budget_mode) also work.
+# injection:
+#   mode: enforce          # enforce | shadow
+#   confidence_floor: 0.0  # reserved paranoid dial; off by default (0.0)
+# budget:
+#   mode: enforce          # enforce | shadow
+
 # Bounded idempotency caches (#35). The decision ledger and the proxy effect-dedup
 # slots share ONE bounded LRU+TTL cache, so unique-key traffic cannot grow them
 # without bound and a stale decision expires + re-evaluates. Defaults: 10000

@@ -15,6 +15,7 @@ import contextlib
 import hashlib
 import inspect
 import json
+import logging
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -22,7 +23,7 @@ from typing import Any
 
 from ._cache import BoundedTTLDict
 from .context import GovernanceContext
-from .errors import GovernanceDenied, GovernanceError
+from .errors import DecisionBudgetExceeded, GovernanceDenied, GovernanceError
 from .injection import GuardedEngine, InjectionClassifier
 from .protocols import (
     AuditEntry,
@@ -31,6 +32,20 @@ from .protocols import (
     IdentityProvider,
     PolicyEngine,
 )
+
+# One-line startup log of active guards (D4/D7): an upgrade that flips fail-closed
+# defaults ON must SAY so, loudly, once per governor — a silent default flip burns
+# upgrade trust. Logged at INFO under the package logger so an operator sees
+# "injection detection: ON (AGT)" without the wrapper printing on a library import.
+_LOG = logging.getLogger("zemtik_govern")
+
+# Per-guard operational stance (D10). ``enforce`` blocks; ``shadow`` observes a
+# would-deny without enforcing it — the observe-then-enforce upgrade path. These
+# scope the existing global shadow machinery to ONE guard so an integrator can run
+# the injection screen (or the budget) in shadow for a release, watch the
+# would-denies, then flip to enforce. Independent of the global ``mode``.
+_GUARD_ENFORCE = "enforce"
+_GUARD_SHADOW = "shadow"
 
 # Stamped on the audit entry when identity itself fails — we still record the
 # blocked outcome, we just have no resolved DID to attribute it to.
@@ -186,6 +201,8 @@ class ZemtikGovern:
         idem_ttl_seconds: float | None = _DEFAULT_IDEM_TTL_SECONDS,
         time_fn: Callable[[], float] = time.monotonic,
         injection_classifier: InjectionClassifier | None = None,
+        injection_mode: str = _GUARD_ENFORCE,
+        budget_mode: str = _GUARD_ENFORCE,
     ) -> None:
         """
         Args:
@@ -219,6 +236,16 @@ class ZemtikGovern:
         # only in hand-built cores with no injection concern; from_config always
         # wires it in non-shadow modes.
         self._injection_classifier = injection_classifier
+        # Per-guard shadow stance (D10). ``injection_mode``/``budget_mode`` =
+        # ``enforce|shadow`` scope the global shadow machinery to ONE guard: an
+        # integrator runs the new guard in shadow for a release, observes the
+        # would-denies in the log/audit, then flips to enforce. Default enforce —
+        # the secure default; shadow is the explicit, temporary opt-out.
+        self._injection_mode = injection_mode
+        self._budget_mode = budget_mode
+        # The injected clock, reused by the budget guard to measure elapsed time
+        # for a breach (and for a shadow-mode would-breach observation).
+        self._time_fn = time_fn
         # Idempotency replay guard. A duplicate idempotency_key must resolve to the
         # SAME decision it did the first time — a replayed fintech write is not a
         # new request. The lock serialises same-key calls so two concurrent
@@ -251,6 +278,33 @@ class ZemtikGovern:
             time_fn=time_fn,
             is_evictable=lambda record: record.is_evictable(),
         )
+        self._log_active_guards(idem_max_entries, idem_ttl_seconds)
+
+    def _log_active_guards(
+        self, idem_max_entries: int, idem_ttl_seconds: float | None
+    ) -> None:
+        """Announce the active guards once, at construction (D4/D7). Names whether
+        injection detection is ON, the decision budget, and the cache caps — so an
+        upgrade that activates fail-closed defaults is visible, not silent."""
+        injection = (
+            f"ON (AGT, {self._injection_mode})"
+            if self._injection_classifier is not None
+            else "OFF"
+        )
+        budget = (
+            f"{self._timeout}s ({self._budget_mode})"
+            if self._timeout is not None
+            else "OFF"
+        )
+        _LOG.info(
+            "zemtik-govern active | mode: %s | injection detection: %s | "
+            "decision budget: %s | idempotency: cap=%s ttl=%s",
+            self._mode,
+            injection,
+            budget,
+            idem_max_entries,
+            idem_ttl_seconds,
+        )
 
     async def govern(self, ctx: GovernanceContext) -> Decision:
         key = ctx.idempotency_key
@@ -274,13 +328,16 @@ class ZemtikGovern:
                 reason=f"idempotency fingerprint failed: {exc}",
                 denial_kind="system",
             )
-            await self._audit.write(
+            event_id = await self._audit.write(
                 AuditEntry.from_decision(
                     ctx, _UNIDENTIFIED_DID, denial, outcome="error", mode=self._mode
                 )
             )
             raise GovernanceError(
-                "idempotency fingerprint failed; tool blocked"
+                "idempotency fingerprint failed; tool blocked",
+                code="idempotency_fingerprint_error",
+                guard="idempotency",
+                audit_id=event_id,
             ) from exc
         async with self._key_lock(key):
             record = self._idem_cache.get(key)
@@ -296,7 +353,7 @@ class ZemtikGovern:
                     # never identity-resolved, so it is NOT attributable to the prior
                     # key holder: stamp the reserved unidentified DID, never the
                     # cached (first-caller) DID.
-                    await self._audit.write(
+                    event_id = await self._audit.write(
                         AuditEntry.from_decision(
                             ctx,
                             _UNIDENTIFIED_DID,
@@ -306,7 +363,10 @@ class ZemtikGovern:
                         )
                     )
                     raise GovernanceError(
-                        "idempotency key reused for a different request; tool blocked"
+                        "idempotency key reused for a different request; tool blocked",
+                        code="idempotency_conflict",
+                        guard="idempotency",
+                        audit_id=event_id,
                     )
                 # Same request: the REPLAY lookup keys on (mode, killswitch_state)
                 # (#35, two-level keying) so a decision ledgered under one stance is
@@ -361,12 +421,24 @@ class ZemtikGovern:
                 reason=f"engine error: {exc}",
                 denial_kind="system",
             )
-            await self._audit.write(
+            event_id = await self._audit.write(
                 AuditEntry.from_decision(
                     ctx, did, denial, outcome="error", mode=self._mode
                 )
             )
-            raise GovernanceError("governance engine failed; tool blocked") from exc
+            # A budget breach already carries its own stable code/guard and the
+            # remedy message (D6/D8); attach the audit id and re-raise it unchanged
+            # so a caller can branch on ``code == "decision_budget_exceeded"`` and
+            # read ``limit_seconds``/``elapsed_seconds`` — wrapping it would erase
+            # all of that behind a generic engine-failed string.
+            if isinstance(exc, DecisionBudgetExceeded):
+                exc.audit_id = event_id
+                raise
+            raise GovernanceError(
+                "governance engine failed; tool blocked",
+                code="engine_error",
+                audit_id=event_id,
+            ) from exc
 
         event_id = await self._audit.write(
             AuditEntry.from_decision(ctx, did, decision, mode=self._mode)
@@ -462,8 +534,11 @@ class ZemtikGovern:
     async def _with_budget(self, coro):
         """Await *coro* under the configured decision budget. With no budget, a
         plain await; with one, an explicit **deadline race** between the engine and
-        a timer. A breach raises ``TimeoutError`` — an ordinary exception caught by
-        the fail-closed boundary above.
+        a timer. A breach raises :class:`DecisionBudgetExceeded` (carrying
+        ``limit_seconds``/``elapsed_seconds`` and the remedy message) — an ordinary
+        exception caught by the fail-closed boundary above, which audits it and
+        re-raises it unchanged so a caller can branch on its ``.code``. In
+        ``budget_mode == "shadow"`` the breach is observed (logged) but not raised.
 
         Why a race and not ``asyncio.wait_for`` (#34, T2 / Codex #1): ``wait_for``
         only surfaces a ``TimeoutError`` if the inner coroutine lets its
@@ -480,6 +555,25 @@ class ZemtikGovern:
         """
         if self._timeout is None:
             return await coro
+        if self._budget_mode == _GUARD_SHADOW:
+            # Observe-only (D10): measure the seam, record a would-breach, but never
+            # enforce — the engine runs to completion and its result is used. The
+            # observe-then-enforce upgrade path: watch the would-denies for a
+            # release before flipping budget_mode to enforce. NOTE: shadow also
+            # forfeits hang-protection — there is no timer, so a genuinely
+            # non-returning engine hangs the governor indefinitely rather than
+            # breaching. Shadow is a temporary observation stance, not a free one.
+            start = self._time_fn()
+            result = await coro
+            elapsed = self._time_fn() - start
+            if elapsed > self._timeout:
+                _LOG.warning(
+                    "decision budget WOULD breach (shadow): limit=%ss elapsed=%.4fs",
+                    self._timeout,
+                    elapsed,
+                )
+            return result
+        start = self._time_fn()
         engine_task = asyncio.ensure_future(coro)
         timer = asyncio.ensure_future(asyncio.sleep(self._timeout))
         try:
@@ -502,7 +596,9 @@ class ZemtikGovern:
             # outcome is discarded either way — the budget already lost.
             with contextlib.suppress(BaseException):
                 await engine_task
-            raise TimeoutError(f"decision budget of {self._timeout}s exceeded")
+            raise DecisionBudgetExceeded(
+                self._timeout, elapsed_seconds=self._time_fn() - start
+            )
         # Engine won the race. Cancel the now-moot timer and return the result.
         timer.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -534,7 +630,9 @@ class ZemtikGovern:
         # fallback alike (#36, T1). The guard presents as a PolicyEngine, so an
         # injection hit is a policy deny folded into this seam (P2).
         if self._injection_classifier is not None:
-            return GuardedEngine(engine, self._injection_classifier)
+            return GuardedEngine(
+                engine, self._injection_classifier, mode=self._injection_mode
+            )
         return engine
 
     # NOTE: the decision→audit-vocabulary mapping that used to live here as

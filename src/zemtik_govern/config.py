@@ -37,6 +37,19 @@ VALID_MODES: tuple[str, ...] = ("strict", "shadow", "enforce")
 # Modes that block on policy: they MUST have a usable policy source.
 _ENFORCING_MODES: tuple[str, ...] = ("strict", "enforce")
 
+# Per-guard stance (D10): a single guard runs ``enforce`` (blocks) or ``shadow``
+# (observes a would-deny without enforcing). The observe-then-enforce upgrade
+# path, scoped to one guard. Default enforce — the secure default.
+VALID_GUARD_MODES: tuple[str, ...] = ("enforce", "shadow")
+_DEFAULT_GUARD_MODE: str = "enforce"
+
+# Injection confidence floor (D5/D7, design Q2). A paranoid-mode dial, exposed in
+# config but OFF by default (0.0 = every detection counts). Reserved: the shipped
+# AGT screen does not yet surface a per-detection confidence to compare against,
+# so a non-zero floor is accepted and documented but not yet load-bearing. Kept in
+# config now so the name and the off-by-default contract are stable for callers.
+_DEFAULT_INJECTION_CONFIDENCE_FLOOR: float = 0.0
+
 # The default per-call decision budget (seconds). Bounds the identity + policy
 # path so a config-built governor is never silently unbounded. Generous enough to
 # not trip a healthy engine, tight enough that a hung seam fails closed promptly;
@@ -86,6 +99,16 @@ class GovernanceConfig:
     # time (registry.from_config), where the file is actually loaded and a missing
     # or malformed file becomes a fail-closed GovernanceNotConfigured.
     injection_rules_path: str | None = None
+    # Per-guard stance (D10). ``injection_mode`` / ``budget_mode`` = ``enforce`` |
+    # ``shadow``. Independent of the global ``mode``: an integrator can run a NEW
+    # guard in shadow for one release (observe would-denies), then flip to enforce
+    # — boring upgrades. Default enforce; the global ``mode`` still gates overall.
+    injection_mode: str = _DEFAULT_GUARD_MODE
+    budget_mode: str = _DEFAULT_GUARD_MODE
+    # Injection confidence floor (D5/D7, design Q2). Off by default (0.0). Reserved
+    # paranoid-mode dial; see the module constant. Documented off-by-default in
+    # docs/configuration-reference.md.
+    injection_confidence_floor: float = _DEFAULT_INJECTION_CONFIDENCE_FLOOR
 
     def __post_init__(self) -> None:
         """Validate the config, raising :class:`GovernanceNotConfigured` on any insecure shape.
@@ -102,6 +125,8 @@ class GovernanceConfig:
         self._validate_rule_shapes()
         self._validate_decision_budget()
         self._validate_idempotency_caps()
+        self._validate_guard_modes()
+        self._validate_confidence_floor()
         # Universal: no mode is allowed to run without somewhere to record outcomes.
         if not self.audit_sink:
             raise GovernanceNotConfigured(
@@ -157,6 +182,34 @@ class GovernanceConfig:
         if isinstance(ttl, bool) or not isinstance(ttl, (int, float)) or ttl <= 0:
             raise GovernanceNotConfigured(
                 f"idempotency_ttl_seconds must be > 0 or None, got {ttl!r}"
+            )
+
+    def _validate_guard_modes(self) -> None:
+        """Each per-guard mode must be ``enforce`` or ``shadow``. A typo'd stance
+        is a startup error, not a silent fall-through to the wrong one — the same
+        fail-at-startup contract the global mode holds."""
+        for name, value in (
+            ("injection_mode", self.injection_mode),
+            ("budget_mode", self.budget_mode),
+        ):
+            if value not in VALID_GUARD_MODES:
+                raise GovernanceNotConfigured(
+                    f"{name} must be one of {VALID_GUARD_MODES}, got {value!r}"
+                )
+
+    def _validate_confidence_floor(self) -> None:
+        """The injection confidence floor must be a number in ``[0.0, 1.0]``
+        (0.0 = off). ``bool`` is rejected (an ``int`` subclass); out-of-range is a
+        misconfiguration, not a tuning choice."""
+        floor = self.injection_confidence_floor
+        if isinstance(floor, bool) or not isinstance(floor, (int, float)):
+            raise GovernanceNotConfigured(
+                f"injection_confidence_floor must be a number in [0.0, 1.0], "
+                f"got {type(floor).__name__}"
+            )
+        if not (0.0 <= floor <= 1.0):
+            raise GovernanceNotConfigured(
+                f"injection_confidence_floor must be in [0.0, 1.0], got {floor!r}"
             )
 
     def _validate_policy_source(self) -> None:
@@ -224,6 +277,29 @@ class GovernanceConfig:
                 "config 'injection_rules_path' must be a string path or null, "
                 f"got {type(injection_rules_path).__name__}"
             )
+        # Per-guard modes (D10). Accept a nested block (``injection: {mode: ...}``)
+        # OR a flat key (``injection_mode: ...``); the nested form mirrors the
+        # design's ``injection.mode`` notation. A non-mapping nested block is a
+        # config error, not a silently-ignored stanza.
+        injection_block = cls._guard_block(data, "injection")
+        budget_block = cls._guard_block(data, "budget")
+        injection_mode = str(
+            injection_block.get("mode", data.get("injection_mode", _DEFAULT_GUARD_MODE))
+        )
+        budget_mode = str(
+            budget_block.get("mode", data.get("budget_mode", _DEFAULT_GUARD_MODE))
+        )
+        floor = injection_block.get(
+            "confidence_floor",
+            data.get(
+                "injection_confidence_floor", _DEFAULT_INJECTION_CONFIDENCE_FLOOR
+            ),
+        )
+        if isinstance(floor, bool) or not isinstance(floor, (int, float)):
+            raise GovernanceNotConfigured(
+                "config 'injection_confidence_floor' must be a number in [0.0, 1.0], "
+                f"got {type(floor).__name__}"
+            )
         return cls(
             mode=str(data.get("mode", "strict")),
             rules=tuple(rules),
@@ -233,7 +309,25 @@ class GovernanceConfig:
             idempotency_max_entries=cap,
             idempotency_ttl_seconds=ttl,
             injection_rules_path=injection_rules_path,
+            injection_mode=injection_mode,
+            budget_mode=budget_mode,
+            injection_confidence_floor=float(floor),
         )
+
+    @staticmethod
+    def _guard_block(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:
+        """Return the nested per-guard block (e.g. ``injection: {mode: ...}``) or an
+        empty mapping when absent. A present-but-non-mapping block is a config
+        error — a scalar ``injection:`` would silently drop ``mode``/floor."""
+        block = data.get(name)
+        if block is None:
+            return {}
+        if not isinstance(block, Mapping):
+            raise GovernanceNotConfigured(
+                f"config {name!r} must be a mapping (e.g. {{mode: shadow}}), "
+                f"got {type(block).__name__}"
+            )
+        return block
 
     @classmethod
     def load(cls, path: str | Path) -> GovernanceConfig:

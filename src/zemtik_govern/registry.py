@@ -9,11 +9,14 @@ half-wired governor that quietly skips a concern at request time.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from .core import ZemtikGovern
 from .errors import GovernanceNotConfigured
 from .protocols import AuditSink, IdentityProvider, PolicyEngine
+
+_LOG = logging.getLogger("zemtik_govern")
 
 if TYPE_CHECKING:
     from ._agt import AGTBoundary
@@ -42,6 +45,21 @@ class GovernanceRegistry:
         self._idem_ttl_set: bool = False
         # Mandatory injection classifier in non-shadow modes (#36); None until wired.
         self._injection_classifier: Any | None = None
+        # Per-guard stance (D10). Default enforce (the secure default); from_config
+        # threads the validated config values so a guard runs shadow only when the
+        # operator asked for it.
+        self._injection_mode: str = "enforce"
+        self._budget_mode: str = "enforce"
+
+    def register_guard_modes(
+        self, injection_mode: str, budget_mode: str
+    ) -> GovernanceRegistry:
+        """The per-guard stances (``enforce|shadow``) carried into
+        ``ZemtikGovern``. Validated at config time; recorded here so ``build()``
+        threads them rather than silently enforcing."""
+        self._injection_mode = injection_mode
+        self._budget_mode = budget_mode
+        return self
 
     def register_injection_classifier(self, impl: Any) -> GovernanceRegistry:
         """The prompt-injection classifier carried into ``ZemtikGovern(
@@ -127,6 +145,8 @@ class GovernanceRegistry:
             audit=self._audit,  # type: ignore[arg-type]
             mode=self._mode,
             timeout=self._decision_budget_seconds,
+            injection_mode=self._injection_mode,
+            budget_mode=self._budget_mode,
             **extra,
         )
 
@@ -151,12 +171,25 @@ class GovernanceRegistry:
         # stance, mirroring the AGT-pins / audit-secret boot-time contract.
         classifier = cls._build_injection_classifier(config, boundary)
 
+        # The confidence floor (D5/Q2) is a reserved paranoid-mode dial: validated
+        # but not yet load-bearing (the shipped AGT screen exposes no per-detection
+        # confidence). Make the inert-ness visible at BOOT, not only in docs, so an
+        # operator who set a non-zero floor expecting fewer denies sees that it has
+        # no runtime effect rather than silently getting full enforcement.
+        if config.injection_confidence_floor > 0.0:
+            _LOG.warning(
+                "injection_confidence_floor=%s is set but reserved (not yet "
+                "load-bearing); detections are not filtered by confidence",
+                config.injection_confidence_floor,
+            )
+
         # Empty rules only reaches here in shadow mode; strict/enforce reject it
         # at config time, so the None (no PolicyDocument) path is not a missed deny.
         rules = list(config.rules) or None
         return (
             cls()
             .register_mode(config.mode)
+            .register_guard_modes(config.injection_mode, config.budget_mode)
             .register_decision_budget(config.decision_budget_seconds)
             .register_idempotency_caps(
                 config.idempotency_max_entries, config.idempotency_ttl_seconds
