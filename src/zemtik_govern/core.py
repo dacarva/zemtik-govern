@@ -78,22 +78,35 @@ class _IdemRecord:
         return self.effect is None or self.effect.done()
 
 
-def _assert_json_native(value: Any) -> None:
+# Hard cap on payload nesting depth for the fingerprint walk. An attacker-deep
+# payload would otherwise blow the Python stack (``RecursionError``) inside the
+# recursive walk before ``json.dumps`` ever runs. We deny it explicitly instead:
+# a ``TypeError`` here is caught by the keyed fail-closed boundary and audited as
+# a system error (tool blocked), so the deny is a clean verdict, not a stack trace.
+_MAX_PAYLOAD_DEPTH = 64
+
+
+def _assert_json_native(value: Any, _depth: int = 0) -> None:
     """Reject anything the old ``default=str`` encoder would have LOSSILY coerced:
     non-string mapping keys and any non-JSON-native leaf (tuple, set, bytes,
     ``datetime``, ``Decimal``, a custom object…). Two distinct such values could
     stringify alike and collapse to one fingerprint — a false replay. Floats are
     left for ``allow_nan=False`` below to police (NaN/Inf). Raises ``TypeError``,
     which the keyed fail-closed boundary in :meth:`ZemtikGovern.govern` catches,
-    audits, and re-raises as :class:`GovernanceError` — the tool never runs."""
+    audits, and re-raises as :class:`GovernanceError` — the tool never runs.
+
+    Depth is bounded (``_MAX_PAYLOAD_DEPTH``) so a pathologically nested payload is
+    an explicit deny, not an uncaught ``RecursionError``."""
+    if _depth > _MAX_PAYLOAD_DEPTH:
+        raise TypeError(f"payload nesting exceeds maximum depth {_MAX_PAYLOAD_DEPTH}")
     if isinstance(value, Mapping):
         for k, v in value.items():
             if not isinstance(k, str):
                 raise TypeError(f"non-string mapping key: {k!r}")
-            _assert_json_native(v)
+            _assert_json_native(v, _depth + 1)
     elif isinstance(value, list):
         for v in value:
-            _assert_json_native(v)
+            _assert_json_native(v, _depth + 1)
     elif isinstance(value, (str, int, float)) or value is None:
         # bool is a subclass of int — admitted here, as JSON-native.
         return
@@ -645,6 +658,13 @@ class _GovernedProxy:
             await self._gov.govern(ctx)  # raises on deny -> the tool never runs
             return await self._invoke(args, kwargs)
 
+        # INVARIANT (single-tool-run): there must be NO await between this
+        # _effect_get returning None and the _effect_reserve below in the
+        # first-call branch. asyncio runs that check-then-reserve without
+        # interleaving, so a concurrent same-key duplicate is guaranteed to see
+        # either the reserved future here or wait on the key lock — never to race
+        # into a second tool invocation. Moving an await between them reopens a
+        # two-tool-run window. Keep them adjacent.
         inflight = self._gov._effect_get(key)
         if inflight is not None:
             # A prior call with this key is in flight or done. Run govern() so the

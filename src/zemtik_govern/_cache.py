@@ -13,7 +13,10 @@ Two deliberate properties make it safe for the effect cache:
   is skipped and the next-oldest evictable entry goes instead. If *nothing* is
   evictable the map is allowed to exceed its cap rather than orphan live work —
   the cap bounds evictable garbage, it is never a license to drop a running
-  effect.
+  effect. The veto guards BOTH reclamation paths: the LRU cap (``_evict_to_cap``)
+  *and* TTL expiry (``get``/``peek``/``__contains__``). A vetoed entry survives its
+  TTL too, so a slow effect that outlives its TTL is not deleted out from under a
+  concurrent duplicate (which would re-invoke the tool — a double-effect).
 - **Time is injected.** ``time_fn`` defaults to :func:`time.monotonic` (immune to
   wall-clock jumps) but tests crank a fake clock for deterministic expiry.
 """
@@ -55,12 +58,16 @@ class BoundedTTLDict(Generic[K, V]):
 
     def get(self, key: K, default: V | None = None) -> V | None:
         """Return the live value for *key*, marking it most-recently-used. An
-        expired entry is dropped and reads as absent (the caller re-evaluates)."""
+        expired entry is dropped and reads as absent (the caller re-evaluates) —
+        UNLESS the eviction veto rejects it (an in-flight effect future): a vetoed
+        entry survives its TTL and reads as live-but-stale, exactly as it survives
+        the LRU cap. Without this, TTL expiry would delete a still-running effect
+        record and a concurrent duplicate would re-invoke the tool (double-effect)."""
         entry = self._data.get(key)
         if entry is None:
             return default
         expires_at, value = entry
-        if self._expired(expires_at):
+        if self._expired(expires_at) and self._is_evictable(value):
             del self._data[key]
             return default
         self._data.move_to_end(key)
@@ -68,12 +75,14 @@ class BoundedTTLDict(Generic[K, V]):
 
     def peek(self, key: K, default: V | None = None) -> V | None:
         """Like :meth:`get` but does NOT refresh recency — a cleanup path must not
-        keep an entry alive merely by inspecting it. Still honours TTL."""
+        keep an entry alive merely by inspecting it. Still honours TTL, and still
+        honours the eviction veto: an in-flight effect survives its TTL (a stale
+        effect record is never silently dropped while its tool call is running)."""
         entry = self._data.get(key)
         if entry is None:
             return default
         expires_at, value = entry
-        if self._expired(expires_at):
+        if self._expired(expires_at) and self._is_evictable(value):
             del self._data[key]
             return default
         return value
@@ -110,7 +119,11 @@ class BoundedTTLDict(Generic[K, V]):
         entry = self._data.get(key)  # type: ignore[arg-type]
         if entry is None:
             return False
-        if self._expired(entry[0]):
+        expires_at, value = entry
+        # A vetoed (in-flight effect) entry is present even past its TTL — same
+        # rule as get/peek and the LRU cap, so membership never lies about a
+        # running effect.
+        if self._expired(expires_at) and self._is_evictable(value):
             del self._data[key]  # type: ignore[arg-type]
             return False
         return True

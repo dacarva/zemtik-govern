@@ -41,6 +41,12 @@ _DEFAULT_INLINE_THRESHOLD = 4096
 _DEFAULT_MAX_PROJECTED_CHARS = 262_144  # 256 KiB of projected text
 _DEFAULT_MAX_WORKERS = 4
 
+# Hard cap on payload nesting depth for the size estimate. A pathologically deep
+# field would otherwise raise ``RecursionError`` in the recursive walk before the
+# size gate ever fires. Denying it explicitly (raise → fail-closed system deny)
+# keeps a deep payload from being an uncaught stack trace on the policy seam.
+_MAX_PAYLOAD_DEPTH = 64
+
 
 @dataclass(frozen=True)
 class InjectionVerdict:
@@ -70,11 +76,14 @@ def _project(value: Any) -> str:
     return json.dumps(value, sort_keys=True, allow_nan=False, separators=(",", ":"))
 
 
-def _estimate_size(value: Any) -> int:
+def _estimate_size(value: Any, _depth: int = 0) -> int:
     """A cheap upper-ish bound on projected size that NEVER calls ``__str__`` on an
     unknown object (so the size gate cannot trigger attacker code). Used only to
     route inline-vs-offload-vs-deny; the authoritative bytes come from
-    :func:`_project`."""
+    :func:`_project`. Depth is bounded (``_MAX_PAYLOAD_DEPTH``) so a deeply nested
+    field is an explicit deny (raise → fail-closed), not a ``RecursionError``."""
+    if _depth > _MAX_PAYLOAD_DEPTH:
+        raise ValueError(f"payload nesting exceeds maximum depth {_MAX_PAYLOAD_DEPTH}")
     if isinstance(value, str):
         return len(value) + 2
     if isinstance(value, bool) or value is None:
@@ -82,9 +91,11 @@ def _estimate_size(value: Any) -> int:
     if isinstance(value, (int, float)):
         return 24
     if isinstance(value, Mapping):
-        return 2 + sum(len(str(k)) + 4 + _estimate_size(v) for k, v in value.items())
+        return 2 + sum(
+            len(str(k)) + 4 + _estimate_size(v, _depth + 1) for k, v in value.items()
+        )
     if isinstance(value, (list, tuple)):
-        return 2 + sum(_estimate_size(v) + 1 for v in value)
+        return 2 + sum(_estimate_size(v, _depth + 1) + 1 for v in value)
     return 64  # unknown/non-native leaf: a placeholder; _project will reject it
 
 

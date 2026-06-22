@@ -113,3 +113,49 @@ def test_peek_does_not_refresh_recency():
 
     assert c.get("a") is None
     assert c.get("b") == 2
+
+
+def test_ttl_expiry_does_not_drop_a_vetoed_in_flight_entry():
+    """The eviction veto guards TTL expiry too, not just the LRU cap. A pinned
+    (in-flight effect) entry survives past its TTL: ``get``/``peek``/``in`` all
+    return it as live-but-stale rather than deleting it. Without this, TTL expiry
+    would delete a still-running effect record out from under a concurrent
+    duplicate, which would then re-invoke the tool (a double-effect)."""
+    pinned = {"a"}  # "a" holds an in-flight (not-done) effect future
+    clk = _clock()
+    c = BoundedTTLDict(
+        maxsize=8,
+        ttl_seconds=10.0,
+        time_fn=clk,
+        is_evictable=lambda v: v not in pinned,
+    )
+    c.set("a", "a")  # pinned, in-flight
+    c.set("b", "b")  # evictable
+
+    clk.tick(11.0)  # both now past the 10s TTL
+
+    assert c.get("a") == "a"  # vetoed -> survives expiry
+    assert c.peek("a") == "a"  # peek honours the veto too
+    assert "a" in c  # membership honours the veto too
+    assert c.get("b") is None  # evictable -> expired and dropped as normal
+
+
+def test_vetoed_entry_expires_normally_once_it_becomes_evictable():
+    """The veto only defers expiry while the effect is in flight. Once the entry
+    becomes evictable (effect completed), the next access past the TTL drops it —
+    a completed effect's TTL is honoured, so the cache cannot leak."""
+    pinned = {"a"}
+    clk = _clock()
+    c = BoundedTTLDict(
+        maxsize=8,
+        ttl_seconds=10.0,
+        time_fn=clk,
+        is_evictable=lambda v: v not in pinned,
+    )
+    c.set("a", "a")
+    clk.tick(11.0)
+    assert c.get("a") == "a"  # still pinned -> survives
+
+    pinned.discard("a")  # effect completed; entry now evictable
+    assert c.get("a") is None  # expired + evictable -> dropped
+    assert "a" not in c

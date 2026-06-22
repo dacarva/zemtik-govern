@@ -14,10 +14,18 @@ boundary, so a collision can never become a false replay.
 import pytest
 
 from zemtik_govern.context import GovernanceContext
-from zemtik_govern.core import ZemtikGovern
+from zemtik_govern.core import _MAX_PAYLOAD_DEPTH, ZemtikGovern, _assert_json_native
 from zemtik_govern.errors import GovernanceError
 from zemtik_govern.identity import AgentRef
 from zemtik_govern.protocols import Decision
+
+
+def _nested(depth: int) -> dict:
+    """A payload nested ``depth`` levels deep: {'n': {'n': {... 'x': 1}}}."""
+    node: dict = {"x": 1}
+    for _ in range(depth):
+        node = {"n": node}
+    return node
 
 
 class _CountingPolicy:
@@ -156,6 +164,41 @@ async def test_non_string_mapping_key_rejected_fail_closed():
                 subject="agent-1",
                 idempotency_key="K",
                 payload={"nested": {1: "a"}},
+            )
+        )
+    assert policy.calls == 0
+    assert audit.entries[-1].outcome == "error"
+
+
+def test_deeply_nested_payload_denied_not_recursionerror():
+    """A pathologically nested payload is denied at a fixed depth (``TypeError``,
+    caught by the fail-closed boundary) rather than blowing the Python stack with a
+    ``RecursionError``. The bound (64) fires well before Python's ~1000 limit."""
+    with pytest.raises(TypeError, match="maximum depth"):
+        _assert_json_native(_nested(_MAX_PAYLOAD_DEPTH + 5))
+
+
+def test_payload_at_the_depth_bound_is_accepted():
+    """The bound is not over-tight: a payload right at the limit still validates, so
+    ordinary nesting is never falsely denied."""
+    _assert_json_native(_nested(_MAX_PAYLOAD_DEPTH - 1))  # no raise
+
+
+@pytest.mark.asyncio
+async def test_deeply_nested_keyed_request_fails_closed():
+    """End to end: a keyed request with an over-deep payload is an audited system
+    error and the tool never runs — an explicit deny, not an uncaught stack trace."""
+    policy = _CountingPolicy(_ALLOW)
+    audit = _RecordingAudit()
+    gov = _gov(policy, audit)
+
+    with pytest.raises(GovernanceError):
+        await gov.govern(
+            GovernanceContext(
+                action="m.run",
+                subject="agent-1",
+                idempotency_key="K",
+                payload=_nested(_MAX_PAYLOAD_DEPTH + 5),
             )
         )
     assert policy.calls == 0
