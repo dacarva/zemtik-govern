@@ -171,7 +171,8 @@ ZEMTIK_AUDIT_SECRET=audit-secret python sandbox/auditor.py
 ZEMTIK_AUDIT_SECRET=dogfood-secret python sandbox/dogfood_cutover.py
 
 # A real gpt-5.4-nano agent governed end to end, plus a 15-prompt injection
-# battery and deterministic module probes (needs [langchain,openai] + an OpenAI key)
+# battery and deterministic module probes — including the output seam redacting
+# PII from a tool's return (needs [langchain,openai] + an OpenAI key)
 uv pip install -e ".[dev,langchain,openai]"
 cp .env.example .env   # then set OPENAI_API_KEY in .env (gitignored)
 python sandbox/e2e_openai_governed.py

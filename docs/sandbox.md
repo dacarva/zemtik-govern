@@ -17,7 +17,7 @@ uv pip install -e ".[dev]"
 | `qa_demo.py` | Three-seam scenarios S1–S16 (allow, deny, fail-closed, idempotency, injection guard, decision budget, error codes/audit_id, per-guard shadow, output-seam PII redaction) | none |
 | `auditor.py` | Durable audit trail: verify Merkle/HMAC, extract inclusion proofs, detect tampering | none |
 | `dogfood_cutover.py` | Staged cutover of a fintech agent: shadow → enforce, kill-switch revert, audit integrity | none |
-| `e2e_openai_governed.py` | A real `gpt-5.4-nano` agent governed through `GovernedToolNode` against a mock bank DB | `[langchain]`, `[openai]`, OpenAI key |
+| `e2e_openai_governed.py` | A real `gpt-5.4-nano` agent governed through `GovernedToolNode` against a mock bank DB, plus deterministic probes for every hardening module (injection battery, decision budget, per-guard shadow, idempotency, error codes, **output seam**) | `[langchain]`, `[openai]`, OpenAI key |
 
 ## qa_demo.py — three-seam scenarios
 
@@ -92,11 +92,33 @@ The policy lives in [`sandbox/e2e_govern.yaml`](../sandbox/e2e_govern.yaml):
 reads (`get_balance`, `list_accounts`) are allowed; writes (`transfer_funds`,
 `close_account`) have no rule, so the deny-by-default moat blocks them.
 
+### Deterministic module probes (incl. the output seam)
+
+A non-deterministic model can't be relied on to trigger every guard on cue (a hung
+seam, a shadow stance, a duplicate key, a PII-laden return), so after the live agent
+run the script drives each hardening module directly against the **same** real
+three-seam pipeline, recording them on their own verifiable trail
+(`sandbox/e2e_modules.audit.jsonl`). These appear in the report's "Security modules
+exercised" table:
+
+- **injection guard** — the 15-prompt malicious battery, all denied;
+- **decision budget** — a slow seam fails closed past its deadline;
+- **per-guard shadow** — a guard observes a would-deny without enforcing;
+- **idempotency + bounded cache** — a duplicate key runs the effect once;
+- **error codes + audit correlation** — a deny is catchable by stable code and `audit_id`;
+- **output seam (#39/#40)** — a tool's RETURN value is screened for PII: a `read`
+  tool raises `OutputGovernanceDenied` (value withheld), a `write` tool returns a
+  `RedactedOutput` sentinel correlated to a HIGH-severity `output_denied_redacted`
+  row (and `gov.unwrap()` collapses that back into a raise), and a clean output
+  passes through. No-echo holds across every surface — the PII never appears in the
+  raise message, the sentinel's `str()`, or the audit row.
+
 Outputs (gitignored):
 
 - `sandbox/e2e_governance_report.md` — human-readable governance report
 - `sandbox/e2e_governance_report.json` — machine-readable, same data verbatim
-- `sandbox/e2e.audit.jsonl` — the durable, signed audit trail
+- `sandbox/e2e.audit.jsonl` — the durable, signed audit trail (live agent run)
+- `sandbox/e2e_modules.audit.jsonl` — the durable, signed trail for the deterministic module probes (incl. the output seam)
 
 Exit code is `0` only when the run PASSES: reads allowed, writes denied, audit
 trail verifies, and the DB is provably unchanged.
