@@ -881,6 +881,60 @@ class ZemtikGovern:
             )
         )
 
+    def unwrap(self, result: Any) -> Any:
+        """Collapse the read-deny-raises / write-deny-returns asymmetry into one call.
+
+        The output seam has two enforcement shapes:
+
+        * **Read-classified tools** raise :class:`~zemtik_govern.errors.OutputGovernanceDenied`
+          directly from ``proxy()`` when an enforce rail fires — the caller never
+          receives the offending value.
+        * **Write-classified tools** *return* a
+          :class:`~zemtik_govern.output.RedactedOutput` sentinel so the already-
+          executed side effect can be logged/tracked, but the redacted value must
+          never be used downstream.
+
+        ``unwrap()`` bridges that asymmetry: wrap **every** governed result in it
+        and the caller sees a uniform contract — clean value through, denied value
+        raises — without needing to ``isinstance``-check for the sentinel::
+
+            result = await proxy_write()
+            value  = gov.unwrap(result)   # raises if result is RedactedOutput
+
+        **No-echo (D6):** the message names the contract ("output was redacted")
+        and the ``audit_id`` back-link, never the withheld value itself.
+
+        Args:
+            result: The value returned by a governed proxy call.
+
+        Returns:
+            *result* unchanged when it is **not** a
+            :class:`~zemtik_govern.output.RedactedOutput`.
+
+        Raises:
+            :class:`~zemtik_govern.errors.OutputGovernanceDenied`: when *result*
+            is a :class:`~zemtik_govern.output.RedactedOutput` sentinel, carrying
+            the sentinel's ``audit_id`` so the caller can correlate to the audit
+            trail without re-deriving anything.
+        """
+        from .output import RedactedOutput
+
+        if isinstance(result, RedactedOutput):
+            # Use object.__getattribute__ to bypass the sentinel's poison
+            # __getattr__ hook — audit_id is a frozen dataclass field stored in
+            # __dict__, but we play it safe in case the sentinel is partially
+            # constructed (e.g. in tests).
+            try:
+                aid = object.__getattribute__(result, "audit_id")
+            except AttributeError:
+                aid = None
+            raise OutputGovernanceDenied(
+                "output was redacted by an output rail; the value is withheld "
+                f"(audit_id={aid!r}); check the audit trail for details",
+                audit_id=aid,
+            )
+        return result
+
     def proxy(
         self,
         fn: Callable[..., Any],

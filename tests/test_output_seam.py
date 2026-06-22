@@ -7,7 +7,6 @@ caller never sees the offending value. This is the spine the other output-rail
 slices (write-deny + RedactedOutput, unwrap, shadow) build on.
 """
 
-import asyncio
 import logging
 import time
 
@@ -478,6 +477,7 @@ async def test_redacted_output_frozen_and_isinstance_checkable():
 async def test_redacted_output_spare_methods_do_not_raise():
     """str/repr/format/json.dumps(default=str) all return the redaction marker."""
     import json
+
     from zemtik_govern.output import RedactedOutput
     r = RedactedOutput(audit_id="evt-42")
     marker = "<output redacted: audit_id=evt-42>"
@@ -598,7 +598,9 @@ def test_output_seam_enabled_logs_screening_on_at_construction(caplog):
     containing the rail name(s) and mode so an operator sees the active rails at
     startup (D4/D7 discoverability pattern)."""
     with caplog.at_level(logging.INFO, logger="zemtik_govern"):
-        gov = _gov(
+        # Constructed for its startup banner side effect; the governor itself is
+        # not exercised here.
+        _gov(
             output_classifiers=[RegexPIIClassifier()],
             tool_io_map={"db.read": "read"},
         )
@@ -613,7 +615,8 @@ def test_output_seam_banner_surfaces_io_map_and_fail_closed_default(caplog):
     2. That every unmapped action defaults to 'write' (fail-closed) — so the
        operator sees the security posture, not just the happy-path listing."""
     with caplog.at_level(logging.INFO, logger="zemtik_govern"):
-        gov = _gov(
+        # Constructed for its startup banner side effect.
+        _gov(
             output_classifiers=[RegexPIIClassifier()],
             tool_io_map={"db.read": "read"},
         )
@@ -670,3 +673,82 @@ async def test_output_seam_disabled_no_banner_and_no_warn(caplog):
         await proxy()
 
     assert "unmapped" not in caplog.text.lower()
+
+
+# --- Issue #41: unwrap() + write-path shadow + enforce unaffected ----------------
+
+
+def test_unwrap_raises_output_governance_denied_on_redacted_output():
+    """Criterion 1: gov.unwrap(RedactedOutput(...)) raises OutputGovernanceDenied
+    carrying the sentinel's audit_id."""
+    from zemtik_govern.output import RedactedOutput
+
+    gov = _gov()
+    sentinel = RedactedOutput(audit_id="evt-99")
+    with pytest.raises(OutputGovernanceDenied) as excinfo:
+        gov.unwrap(sentinel)
+
+    err = excinfo.value
+    assert err.audit_id == "evt-99"
+    assert err.code == "output_denied"
+
+
+def test_unwrap_returns_normal_value_unchanged():
+    """Criterion 2: gov.unwrap(value) returns value unchanged for non-sentinel values."""
+    gov = _gov()
+    assert gov.unwrap("hello") == "hello"
+    assert gov.unwrap(42) == 42
+    assert gov.unwrap(None) is None
+    assert gov.unwrap({"k": "v"}) == {"k": "v"}
+
+
+@pytest.mark.asyncio
+async def test_per_rail_shadow_write_path_returns_real_value_not_sentinel():
+    """Criterion 3 (write-path): a rail in shadow mode audits a would-deny on a
+    WRITE-classified tool but lets the output pass through — caller receives the
+    real value, not a RedactedOutput sentinel."""
+    from zemtik_govern.output import RedactedOutput
+
+    seams = _Seams()
+    gov = _gov(
+        seams=seams,
+        output_classifiers=[RegexPIIClassifier(mode="shadow")],
+        # no io_map => write (fail-closed default)
+    )
+    proxy = gov.proxy(lambda: "pii carol@example.org", action="send.email", subject="a")
+    result = await proxy()
+
+    # Shadow rail: real value passes through, NOT a RedactedOutput
+    assert not isinstance(result, RedactedOutput)
+    assert result == "pii carol@example.org"
+    # Would-deny audit row emitted
+    assert seams.entries[-1].event_type == "output_would_deny"
+
+
+@pytest.mark.asyncio
+async def test_enforce_rail_unaffected_by_shadow_machinery():
+    """Criterion 4: an enforce-mode rail still redacts on a write tool even when a
+    SHADOW rail is wired alongside it. The shadow rail observes a would-deny first
+    (audited), then the enforce rail fires and redacts — the shadow path does not
+    suppress enforcement."""
+    from zemtik_govern.output import RedactedOutput
+
+    seams = _Seams()
+    # Two rails on the same write tool: one shadow (observe-only), one enforce.
+    # The shadow rail runs first and must NOT swallow the enforce rail's redaction.
+    gov = _gov(
+        seams=seams,
+        output_classifiers=[
+            RegexPIIClassifier(mode="shadow"),
+            RegexPIIClassifier(mode="enforce"),
+        ],
+        # no io_map => write (fail-closed default)
+    )
+    proxy = gov.proxy(lambda: "pii dave@example.com", action="send.email", subject="a")
+    result = await proxy()
+
+    # Enforce rail still redacts despite the shadow rail observing first.
+    assert isinstance(result, RedactedOutput)
+    event_types = [e.event_type for e in seams.entries]
+    assert "output_would_deny" in event_types
+    assert seams.entries[-1].event_type == "output_denied_redacted"
