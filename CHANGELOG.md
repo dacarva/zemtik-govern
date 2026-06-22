@@ -9,17 +9,16 @@ via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 ### BREAKING
 
 - **Fail-closed defaults are now ON by default.** A config-built governor
-  (`GovernanceRegistry.from_config`) in `strict`/`enforce` mode now REQUIRES an
-  explicit `injection_rules_path` (it refuses to start on AGT sample rules), runs
-  with a **5.0s `decision_budget_seconds`** by default, and bounds both
-  idempotency caches (10000 entries / 3600s TTL). An upgrade that previously
-  started will now raise `GovernanceNotConfigured` at startup if it lacks an
-  injection rule file in a non-shadow mode — this is intentional: the guard you
-  did not know you needed is on, loudly.
+  (`GovernanceRegistry.from_config`) in `strict`/`enforce` mode now wires a
+  mandatory prompt-injection guard (using AGT's own vetted detection config by
+  default — no rule file required), runs with a **5.0s `decision_budget_seconds`**
+  by default, and bounds both idempotency caches (10000 entries / 3600s TTL). The
+  guard is on whether or not you configure it; an upgrade does not need a rule
+  file to get protection.
 
-  **Migration.** (1) Add `injection_rules_path: policies/prompt-injection.yaml`
-  (or your own rule file) to every non-shadow config, or run the new guard in
-  `injection: {mode: shadow}` for one release to observe would-denies first.
+  **Migration.** (1) Nothing required for the injection guard — it activates with
+  AGT's defaults. Set `injection_rules_path` only to pin a version or diverge, or
+  run `injection: {mode: shadow}` for one release to observe would-denies first.
   (2) If a latency-sensitive path cannot tolerate the 5s budget, set
   `decision_budget_seconds` explicitly (it is now unit-suffixed — seconds, not
   ms) or `null` to opt out when an upstream caller enforces its own deadline.
@@ -33,8 +32,13 @@ via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
   screen folded into the policy seam and wrapped around the SELECTED engine —
   primary AND killswitch fallback — so it cannot be bypassed during a killswitch
   emergency. Strict, size-bounded, off-loop projection (an attacker `__str__` is
-  never invoked); a hit is a D6 no-echo policy deny naming the field only. Swap in
-  your own classifier via the `InjectionClassifier` Protocol.
+  never invoked); a hit is a D6 no-echo policy deny naming the field only. By
+  default the guard uses AGT's own vetted `PromptInjectionConfig()` detection
+  rules, passed explicitly (warning-free, no in-repo copy to maintain — it tracks
+  the pinned AGT wheel). Set `injection_rules_path` to a file only to pin a
+  version or diverge; `policies/prompt-injection.yaml` is an optional, ready-to-
+  edit snapshot of those defaults. Swap the whole classifier via the
+  `InjectionClassifier` Protocol.
 - **Bounded idempotency caches + two-level keying (#35).** The decision ledger and
   the proxy effect-dedup slots share ONE bounded LRU+TTL cache, so unique-key
   traffic cannot grow them without bound and they evict consistently. Replay keys

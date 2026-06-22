@@ -177,17 +177,21 @@ with a changed payload is still caught regardless of the mode/killswitch bucket.
 
 ### `injection_rules_path`
 
-Path to the **explicit** prompt-injection rule file (#36), loaded through
-`AGTBoundary` into AGT's `PromptInjectionDetector(injection_config=...)`.
+**Optional** path to a prompt-injection rule file (#36), loaded through
+`AGTBoundary` into AGT's `PromptInjectionDetector(injection_config=...)`. Leave it
+unset and the guard uses AGT's own vetted `PromptInjectionConfig()` defaults,
+passed explicitly — warning-free, and tracking the pinned AGT wheel with no
+in-repo file to maintain. Set it only to pin a version or diverge.
 
 ```yaml
+# optional — omit to use AGT's vetted defaults
 injection_rules_path: policies/prompt-injection.yaml
 ```
 
 | Mode | Behaviour |
 |------|-----------|
-| `strict` / `enforce` | **Required.** A missing path, or a file that does not exist / lacks the required `detection_patterns` section, is a startup error (`GovernanceNotConfigured`) — never a silent fall-back to AGT's sample rules. |
-| `shadow` | Optional; if given, still loaded and validated. |
+| `strict` / `enforce` | Guard is **always on**. With no path it uses AGT's explicit defaults; with a path the file must exist and contain a `detection_patterns` section, else startup is a `GovernanceNotConfigured` error. Neither path is the bare sample-rule fall-back. |
+| `shadow` | Optional; if given, still loaded and validated; if omitted, the guard is not wired (observe-only mode). |
 
 The screen is **mandatory and fail-closed**, folded into the **policy seam**: a hit
 is a *policy* deny. It wraps the engine `_select_engine()` returns, so the

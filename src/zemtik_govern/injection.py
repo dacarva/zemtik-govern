@@ -107,7 +107,7 @@ class AgtInjectionClassifier:
     def __init__(
         self,
         boundary: AGTBoundary,
-        rules_path: str,
+        rules_path: str | None = None,
         *,
         inline_threshold: int = _DEFAULT_INLINE_THRESHOLD,
         max_projected_chars: int = _DEFAULT_MAX_PROJECTED_CHARS,
@@ -115,9 +115,11 @@ class AgtInjectionClassifier:
         executor: ThreadPoolExecutor | None = None,
     ) -> None:
         self._boundary = boundary
-        # Build the detector ONCE with explicit rules (detection is pure; reuse is
-        # correct and cheaper than recompiling patterns per call). A missing/bad
-        # rule file raises here — surfaced as GovernanceNotConfigured by the caller.
+        # Build the detector ONCE (detection is pure; reuse is correct and cheaper
+        # than recompiling patterns per call). ``rules_path=None`` uses AGT's own
+        # vetted defaults (no in-repo file to maintain); a path loads a custom rule
+        # file, and a missing/bad file raises here — surfaced as
+        # GovernanceNotConfigured by the caller.
         self._detector = boundary.prompt_injection_detector(rules_path)
         self._inline_threshold = inline_threshold
         self._max_projected_chars = max_projected_chars

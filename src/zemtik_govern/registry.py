@@ -209,21 +209,23 @@ class GovernanceRegistry:
     def _build_injection_classifier(config: GovernanceConfig, boundary: AGTBoundary):
         """Build the AGT-backed injection classifier, fail-closed (#36).
 
-        Non-shadow modes REQUIRE an explicit ``injection_rules_path``; a missing
-        path, or a file that does not exist / lacks the required sections, is a
-        startup error (``GovernanceNotConfigured``) — never a silent fall-back to
-        AGT's sample rules. Shadow mode (observe-only) may omit it; if a path is
-        given it is still wired and validated."""
+        Non-shadow modes always wire a mandatory injection guard. With no
+        ``injection_rules_path`` the guard uses AGT's own vetted
+        ``PromptInjectionConfig()`` defaults, passed EXPLICITLY — this is not the
+        sample-rule fall-back (that path is the bare detector, which warns); the
+        rules track the pinned AGT wheel with no in-repo file to maintain. Supply a
+        path only to pin a version or diverge; a file that does not exist / lacks
+        the required sections is then a startup error (``GovernanceNotConfigured``).
+        Shadow mode (observe-only) may omit the guard entirely; a path is still
+        wired and validated if given."""
         from .injection import AgtInjectionClassifier
 
         path = config.injection_rules_path
         if not path:
             if config.mode == GovernanceRegistry._SHADOW_MODE:
                 return None
-            raise GovernanceNotConfigured(
-                f"{config.mode} mode requires an explicit injection_rules_path; "
-                "refusing to run on AGT sample injection rules"
-            )
+            # AGT's vetted defaults, explicit and warning-free — no sample fallback.
+            return AgtInjectionClassifier(boundary)
         try:
             return AgtInjectionClassifier(boundary, path)
         except (FileNotFoundError, ValueError) as exc:

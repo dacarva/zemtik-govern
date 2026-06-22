@@ -245,10 +245,11 @@ As of the security-hardening release, a config-built governor in `strict`/`enfor
 mode runs with fail-closed defaults ON. An upgrade that previously started may now
 raise `GovernanceNotConfigured` at startup — by design. Three things to check:
 
-1. **Injection rules are mandatory in non-shadow modes.** Add
-   `injection_rules_path: policies/prompt-injection.yaml` (or your own rule file).
-   To stage it, run the guard in `injection: {mode: shadow}` for one release first
-   (see "Per-guard shadow" above), then flip to enforce.
+1. **The injection guard is on by default in non-shadow modes** — using AGT's own
+   vetted detection rules, no config required. Set `injection_rules_path` only to
+   pin a version or diverge. To stage enforcement, run the guard in
+   `injection: {mode: shadow}` for one release first (see "Per-guard shadow"
+   above), then flip to enforce.
 2. **The decision budget defaults to 5.0s.** It is unit-suffixed
    (`decision_budget_seconds`) — seconds, not ms. Lower it on latency-sensitive
    paths, or set it to `null` to opt out when an upstream caller enforces its own

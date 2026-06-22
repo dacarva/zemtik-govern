@@ -93,6 +93,7 @@ class AGTBoundary:
         # (and so pin assertion runs before any AGT code is touched).
         from agent_os.policies import PolicyDocument as _PolicyDocument
         from agent_os.policies import PolicyEvaluator as _PolicyEvaluator
+        from agent_os.prompt_injection import PromptInjectionConfig as _InjectionConfig
         from agent_os.prompt_injection import PromptInjectionDetector as _Detector
         from agent_os.prompt_injection import (
             load_prompt_injection_config as _load_injection_config,
@@ -104,6 +105,7 @@ class AGTBoundary:
         self._PolicyEvaluator = _PolicyEvaluator
         self._PolicyDocument = _PolicyDocument
         self._Detector = _Detector
+        self._InjectionConfig = _InjectionConfig
         self._load_injection_config = _load_injection_config
         self._AuditLog = _AuditLog
         self._FileAuditSink = _FileAuditSink
@@ -138,17 +140,24 @@ class AGTBoundary:
         return self._FileAuditSink(path, secret_key)
 
     # --- prompt-injection concern (agent_os) ---
-    def prompt_injection_detector(self, rules_path: str):
-        """Build an AGT ``PromptInjectionDetector`` from an EXPLICIT rule file.
+    def prompt_injection_detector(self, rules_path: str | None = None):
+        """Build an AGT ``PromptInjectionDetector`` with an EXPLICIT rule config.
 
-        The rule set is loaded via ``load_prompt_injection_config`` and passed as
-        ``injection_config=`` so the detector uses our pinned patterns, NOT AGT's
-        sample defaults (which would only emit a ``UserWarning``). A missing or
-        malformed file raises ``FileNotFoundError`` / ``ValueError`` — the caller
-        (registry) turns either into a fail-closed ``GovernanceNotConfigured`` at
-        startup, never a silent fall-back to sample rules. Detection is pure, so
-        one detector is built once and reused (see the spike findings)."""
-        config = self._load_injection_config(rules_path)
+        With ``rules_path=None`` (the default), the detector is built from AGT's
+        own vetted ``PromptInjectionConfig()`` defaults, passed explicitly. This
+        is NOT the bare ``PromptInjectionDetector()`` sample-rule path: passing an
+        explicit config suppresses AGT's sample-rule ``UserWarning``, and the rules
+        track the pinned wheel automatically (no in-repo copy to maintain). Pass a
+        ``rules_path`` to load a custom file instead (to pin a version or diverge);
+        a missing or malformed file raises ``FileNotFoundError`` / ``ValueError``,
+        which the caller (registry) turns into a fail-closed
+        ``GovernanceNotConfigured`` at startup. Detection is pure, so one detector
+        is built once and reused (see the spike findings)."""
+        config = (
+            self._InjectionConfig()
+            if rules_path is None
+            else self._load_injection_config(rules_path)
+        )
         return self._Detector(injection_config=config)
 
     def screen_text(

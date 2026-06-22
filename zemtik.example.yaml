@@ -41,13 +41,17 @@ rules:
 # Alternatively, load rules from a directory of policy files instead of inline:
 # policy_dir: ./policies
 
-# Explicit prompt-injection rule file (#36). MANDATORY in strict/enforce modes:
-# the wrapper refuses to start without it rather than ship AGT's sample rules
-# (GovernanceNotConfigured). The screen wraps the SELECTED policy engine — primary
-# AND killswitch fallback — so an injection cannot slip through during a killswitch
-# emergency. A hit is a policy deny that names the offending FIELD only (never the
-# raw payload). Shadow mode may omit it. See policies/prompt-injection.yaml.
-injection_rules_path: policies/prompt-injection.yaml
+# Prompt-injection rule file (#36). OPTIONAL. In strict/enforce the guard is
+# always on; with no path it uses AGT's own vetted detection rules (explicit,
+# warning-free, tracks the pinned AGT wheel — nothing to maintain). Set a path
+# ONLY to pin a version or diverge from AGT; the file must contain a
+# `detection_patterns` section or startup fails (GovernanceNotConfigured). The
+# screen wraps the SELECTED policy engine — primary AND killswitch fallback — so an
+# injection cannot slip through during a killswitch emergency. A hit is a policy
+# deny that names the offending FIELD only (never the raw payload). Shadow mode
+# may omit the guard entirely. policies/prompt-injection.yaml is a ready-to-edit
+# snapshot of AGT's defaults.
+# injection_rules_path: policies/prompt-injection.yaml
 
 # Per-guard stance (D10). Scope shadow to ONE guard for an observe-then-enforce
 # upgrade: run a new guard in `shadow` for a release to watch would-denies in the

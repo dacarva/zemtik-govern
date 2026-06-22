@@ -1,47 +1,86 @@
-# zemtik-govern — pinned prompt-injection detection rules (#36)
+# zemtik-govern — OPTIONAL prompt-injection rule override (#36)
 #
-# Loaded through AGTBoundary.prompt_injection_detector() into AGT's
-# PromptInjectionDetector(injection_config=...). Shipping an EXPLICIT rule set is
-# mandatory: the bare detector falls back to AGT's sample rules and emits a
-# UserWarning (see spike/injection-detector-findings.md). A non-shadow governor
-# refuses to start without this file (GovernanceNotConfigured) rather than ship
-# sample coverage — mirroring the AGT-pins / audit-secret boot-time contract.
+# You do NOT need this file. By default zemtik-govern builds the injection guard
+# from AGT's own vetted PromptInjectionConfig() defaults, passed explicitly (no
+# in-repo copy, no sample-rule warning, tracks the pinned AGT wheel automatically).
+# Set `injection_rules_path` to this file ONLY when you want to:
+#   1. Pin a version — freeze the exact patterns so an AGT wheel bump (e.g.
+#      3.7.0 -> the consolidated v4.0.0) cannot silently shift what is detected.
+#   2. Diverge — add or remove patterns for your own threat model.
+#
+# The patterns below are a snapshot of AGT agent-os-kernel 3.7.0's defaults, kept
+# as a ready-to-edit starting point. Regenerate after an AGT bump by re-dumping
+# the wheel's defaults, or edit freely to diverge.
 #
 # Format consumed by agent_os.prompt_injection.load_prompt_injection_config:
 # a top-level `detection_patterns` section (required) of regex lists per category.
-# Tune for your own threat model; these are a conservative, pinned starting set.
 detection_patterns:
   direct_override:
-    - "(?i)ignore\\s+(all\\s+)?(previous|prior|above|earlier)\\s+(instructions|prompts|rules|context)"
-    - "(?i)disregard\\s+(all\\s+)?(previous|prior|your|the)\\s+(instructions|rules|prompt)"
-    - "(?i)forget\\s+(everything|all|your\\s+instructions|previous)"
-    - "(?i)override\\s+(your|the|all)\\s+(instructions|rules|system\\s+prompt)"
-    - "(?i)new\\s+instructions?\\s*:?\\s*(ignore|disregard|forget)"
+  - "ignore\\s+(all\\s+)?previous\\s+instructions"
+  - "you\\s+are\\s+now\\b"
+  - "new\\s+role\\s*:"
+  - "forget\\s+(everything|all|your)\\b"
+  - "disregard\\s+(all\\s+)?(above|prior|previous)\\b"
+  - "override\\s+(previous\\s+)?instructions"
+  - "do\\s+not\\s+follow\\s+(your|the)\\s+(previous\\s+)?instructions"
   delimiter:
-    - "(?i)<\\|im_start\\|>"
-    - "(?i)<\\|im_end\\|>"
-    - "(?i)\\[INST\\]"
-    - "(?i)\\[/INST\\]"
-    - "(?i)###\\s*(system|instruction)"
+  - "^-{3,}\\s*$"
+  - "^#{3,}\\s*$"
+  - "^```\\s*$"
+  - "END\\s+SYSTEM"
+  - "BEGIN\\s+USER"
+  - "<\\|im_start\\|>"
+  - "<\\|im_end\\|>"
+  - "\\[INST\\]"
+  - "<<SYS>>"
+  - "<\\|system\\|>"
+  - "<\\|user\\|>"
+  - "<\\|assistant\\|>"
   role_play:
-    - "(?i)you\\s+are\\s+now\\s+(a|an|in)\\s+.*(mode|persona|character|assistant)"
-    - "(?i)pretend\\s+(to\\s+be|you\\s+are|that)"
-    - "(?i)act\\s+as\\s+(if|a|an|though)"
-    - "(?i)\\bDAN\\b|do\\s+anything\\s+now"
-    - "(?i)developer\\s+mode\\s+(enabled|on)"
+  - "pretend\\s+you\\s+are"
+  - "act\\s+as\\s+if\\s+you\\s+have\\s+no\\s+restrictions"
+  - "\\bjailbreak\\b"
+  - "\\bDAN\\s+mode\\b"
+  - "developer\\s+mode\\s+override"
+  - "bypass\\s+(all\\s+)?(safety|content)\\s+(filters?|restrictions?)"
+  - "you\\s+have\\s+no\\s+(limitations?|restrictions?|rules?)"
   context_manipulation:
-    - "(?i)(reveal|show|print|repeat)\\s+(your|the)\\s+(system\\s+prompt|instructions|rules)"
-    - "(?i)what\\s+(are|were)\\s+your\\s+(original\\s+)?instructions"
-    - "(?i)end\\s+of\\s+(prompt|context|instructions)"
+  - "the\\s+above\\s+instructions\\s+are\\s+wrong"
+  - "actually\\s+your\\s+real\\s+instructions\\s+are"
+  - "the\\s+developer\\s+told\\s+me\\s+to\\s+tell\\s+you"
+  - "secret\\s+password\\s+is"
+  - "your\\s+true\\s+purpose\\s+is"
+  - "the\\s+real\\s+system\\s+prompt\\s+is"
   multi_turn:
-    - "(?i)as\\s+we\\s+(agreed|discussed)\\s+earlier.*(ignore|bypass|override)"
+  - "as\\s+I\\s+mentioned\\s+before.*you\\s+agreed\\s+to"
+  - "you\\s+already\\s+said\\s+yes"
+  - "continuing\\s+from\\s+where\\s+you\\s+unlocked"
+  - "you\\s+previously\\s+confirmed"
+  - "we\\s+already\\s+established\\s+that\\s+you\\s+can"
   encoding:
-    - "(?i)decode\\s+(this|the\\s+following)\\s+(base64|hex|rot13)"
-    - "(?i)execute\\s+(the\\s+)?(decoded|following)\\s+"
+  - "\\\\x[0-9a-fA-F]{2}(?:\\\\x[0-9a-fA-F]{2}){3,}"
+  - "\\\\u[0-9a-fA-F]{4}(?:\\\\u[0-9a-fA-F]{4}){3,}"
+  - "\\brot13\\b"
+  - "\\bbase64\\s*decode\\b"
+  - "\\bhex\\s*decode\\b"
+  base64_pattern: "[A-Za-z0-9+/]{20,}={0,2}"
 suspicious_decoded_keywords:
-  - "ignore"
-  - "system prompt"
-  - "exfiltrate"
-  - "credentials"
-  - "api key"
-disclaimer: "zemtik-govern pinned rules; deny on match (D6: never echo payload)."
+- ignore
+- override
+- system
+- password
+- secret
+- admin
+- root
+- exec
+- eval
+- import os
+sensitivity_thresholds:
+  strict: 0.3
+  balanced: 0.5
+  permissive: 0.7
+sensitivity_min_threat:
+  strict: low
+  balanced: low
+  permissive: high
+disclaimer: "zemtik-govern: AGT agent-os-kernel 3.7.0 default detection rules, pinned verbatim. Deny on match (D6: never echo payload)."
