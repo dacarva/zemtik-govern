@@ -76,3 +76,51 @@ idempotency_ttl_seconds: 3600.0
 # null to opt out — only when an upstream caller enforces its own deadline.
 # Unit is in the name to kill the seconds-vs-ms footgun.
 decision_budget_seconds: 5.0
+
+# ---------------------------------------------------------------------------
+# Output screening (post-invocation rail seam, #39/#40)
+#
+# The output seam runs ONLY inside proxy(). Direct govern()/govern_sync()
+# callers are input-only — no output redaction occurs on those paths.
+# ---------------------------------------------------------------------------
+
+# Master switch: set to true to enable the output rail seam in proxy().
+# Off by default — opt-in. Without this set, proxy() returns raw tool output
+# regardless of the rails configured below.
+output_screening: false
+
+# Classify each action as read or write.
+#   read  — a PII hit RAISES OutputGovernanceDenied (value withheld).
+#   write — a PII hit RETURNS RedactedOutput sentinel (value scrubbed, audit row
+#           written at HIGH severity) because the side effect already executed.
+# An action absent from this map defaults to write (fail-closed). When the output
+# seam is active, a WARNING is logged once per unmapped action so a forgotten
+# read tool is caught in dev/staging before it ships as a silently-redacted write.
+tool_io_map:
+  tool.run: read     # change to write for tools that mutate external state
+  # tool.search: read
+  # payment.send: write
+
+# Per-rail thresholds and modes. Each named rail corresponds to one output
+# classifier; C0 ships "pii" (RegexPIIClassifier). The mode is independent of
+# the global `mode` above — the classic observe-then-enforce onboarding path:
+#
+#   Step 1 — OBSERVE (ship in shadow, watch audit rows for output_would_deny):
+#     rails:
+#       pii:
+#         threshold: 0.0
+#         mode: shadow
+#
+#   Step 2 — ENFORCE (after a release with no false-denies, flip to enforce):
+#     rails:
+#       pii:
+#         threshold: 0.0
+#         mode: enforce   # read tools raise; write tools return RedactedOutput
+#
+# threshold: 0.0–1.0. The regex PII rail is binary (confidence 1.0) so any
+# threshold <= 1.0 lets it fire. Scoring providers (e.g. Presidio, C1 roadmap)
+# surface real confidences you can tune here.
+rails:
+  pii:
+    threshold: 0.0
+    mode: shadow    # start in shadow; flip to enforce once you've reviewed

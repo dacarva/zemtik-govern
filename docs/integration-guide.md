@@ -310,6 +310,65 @@ is **off by default** (`0.0`) and reserved; see the configuration reference.
 
 ---
 
+### Output screening (post-invocation PII rail)
+
+The output seam runs only inside `proxy()` — direct `govern()`/`govern_sync()`
+callers are input-only. Enable it via `output_screening: true` in the config or by
+passing `output_classifiers=[...]` to `ZemtikGovern` directly.
+
+```python
+from zemtik_govern.output import RegexPIIClassifier
+
+gov = ZemtikGovern(
+    identity=...,
+    policy=...,
+    audit=...,
+    mode="strict",
+    output_classifiers=[RegexPIIClassifier(threshold=0.0, mode="enforce")],
+    tool_io_map={"tool.query": "read", "payment.send": "write"},
+)
+
+# Read tool: a PII hit raises OutputGovernanceDenied (value withheld).
+read_proxy = gov.proxy(fetch_user, action="tool.query", subject="agent-1")
+try:
+    result = await read_proxy(user_id=42)
+except OutputGovernanceDenied as e:
+    # e.rail names the firing rail; e.audit_id back-links to the denied row.
+    log.error("output blocked", rail=e.rail, audit_id=e.audit_id)
+
+# Write tool: a PII hit returns RedactedOutput (side effect already ran).
+write_proxy = gov.proxy(send_payment, action="payment.send", subject="agent-1")
+result = await write_proxy(amount=100)
+# Use gov.unwrap() for a uniform contract across read and write:
+value = gov.unwrap(result)   # raises OutputGovernanceDenied if result is RedactedOutput
+```
+
+**Observe-then-enforce onboarding:**
+
+```python
+# Step 1: deploy in shadow — observe would-deny audit rows, no enforcement.
+gov = ZemtikGovern(
+    ...,
+    output_classifiers=[RegexPIIClassifier(threshold=0.0, mode="shadow")],
+    tool_io_map={"payment.send": "write"},
+)
+# After a release with no false-denies:
+# Step 2: flip rail mode to "enforce".
+gov = ZemtikGovern(
+    ...,
+    output_classifiers=[RegexPIIClassifier(threshold=0.0, mode="enforce")],
+    tool_io_map={"payment.send": "write"},
+)
+```
+
+**Scope limits:**
+- Output seam only in `proxy()`. `govern()`/`govern_sync()` are input-only.
+- Non-keyed proxy gets output screening but NOT effect-idempotency.
+- Non-JSON return types (custom objects, generators, non-UTF-8 bytes) are
+  denied fail-closed: read tools raise, write tools return `RedactedOutput`.
+
+---
+
 ## Error Handling Reference
 
 Every governance exception subclasses `GovernanceError` and carries a stable
@@ -323,6 +382,17 @@ written audit row (and `Decision.audit_id` on an allowed result).
 | `GovernanceError` | `idempotency_conflict`, `idempotency_fingerprint_error`, `engine_error`, `governance_error` | System fault in a seam (idempotency key reuse, unserialisable payload, engine failure). | No |
 | `GovernanceNotConfigured` | `not_configured` | Bad startup config or missing seam. Fix before retry. | No |
 | `AGTVersionError` | — | AGT pin mismatch. Fix environment before retry. | No |
+| `OutputGovernanceDenied` | `output_denied` | Output rail fired on a **read** tool — value withheld, exception raised. `.rail` names the rail; `.audit_id` back-links to the `output_denied_raised` row. Tool ran but result suppressed. | Yes (result suppressed) |
+| `RedactedOutputAccessError` | `output_redacted_access` | Caller attempted to access a `RedactedOutput` sentinel (attribute/item/iter). `.audit_id` back-links to the `output_denied_redacted` row. | Yes (result redacted) |
+
+**Output audit-name → effect mapping:**
+
+| `event_type` | Severity | Meaning |
+|--------------|----------|---------|
+| `output_allowed` | — | Output was clean; value returned to caller. |
+| `output_denied_raised` | — | Read tool; rail fired in enforce mode; `OutputGovernanceDenied` raised; value withheld. |
+| `output_denied_redacted` | **HIGH** | Write tool; rail fired in enforce mode; `RedactedOutput` sentinel returned; value scrubbed. |
+| `output_would_deny` | — | Rail fired in shadow mode; value returned unblocked; would-deny observed. |
 
 ```python
 try:
@@ -334,7 +404,8 @@ except GovernanceError as e:
     raise
 ```
 
-All governance exceptions mean the tool **did not run**.
+All governance exceptions mean the tool **did not run** (or its result was
+suppressed / redacted for output exceptions).
 
 ---
 
@@ -346,3 +417,6 @@ All governance exceptions mean the tool **did not run**.
 - [ ] Direct `govern()` callers gate side effects on `allowed and not replayed`
 - [ ] `proxy()` callers get effect-idempotency automatically — no extra guard needed
 - [ ] `context_factory` functions return `GovernanceContext`, never a plain dict
+- [ ] Output screening: classify each action in `tool_io_map` (read or write) — unmapped defaults to write (fail-closed)
+- [ ] Start rails in `mode: shadow` to observe would-denies before flipping to `enforce`
+- [ ] Wrap every `proxy()` result in `gov.unwrap()` for a uniform read/write contract

@@ -4,6 +4,27 @@ All notable changes to zemtik-govern are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project versions
 via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 
+## [Unreleased] — output seam docs + sandbox S16
+
+### Added
+
+- **Output-seam documentation (#43).** `zemtik.example.yaml` now annotates
+  `output_screening`, `tool_io_map`, and `rails` with an observe→enforce onboarding
+  block. `docs/configuration-reference.md` documents all three fields (YAML shape,
+  classification table, onboarding steps). `docs/integration-guide.md` documents
+  the output screening usage pattern, the `gov.unwrap()` caller contract,
+  `OutputGovernanceDenied` / `RedactedOutputAccessError`, and the
+  audit-name→effect mapping. `docs/architecture.md` documents the output seam
+  design: proxy()-only scope, output-deny asymmetry, sentinel contract, no-echo,
+  non-JSON deny, unmapped-action warn-once. `docs/sandbox.md` documents S16.
+- **Sandbox S16 — output PII redaction** (`sandbox/qa_demo.py`). A write-classified
+  tool returning PII is redacted: `RedactedOutput` sentinel returned (not raised),
+  HIGH-severity `output_denied_redacted` audit row written, sentinel's `audit_id`
+  correlated to the row (D9), raw PII not recoverable via `str()` (D6 no-echo),
+  Merkle chain verifies. Suite now covers S1–S16 (16 passed).
+
+---
+
 ## [0.3.0.0] - 2026-06-22
 
 ### BREAKING

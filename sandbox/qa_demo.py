@@ -4,11 +4,15 @@
 Run with:
     ZEMTIK_AUDIT_SECRET=qa-test-secret python sandbox/qa_demo.py
 
-Scenarios (S1-S15) map to the security guarantees documented in
+Scenarios (S1-S16) map to the security guarantees documented in
 docs/architecture.md. S1-S10 cover the three-seam core; S11-S15 cover the
 v0.3.0.0 hardening: the prompt-injection guard (#36), the decision budget
 (#34), stable error codes + audit correlation (D8/D9), and per-guard shadow
-(D10). Each must print PASS for the QA run to be green.
+(D10). S16 covers the output-seam (#39/#40): a write-classified tool whose
+return contains PII is redacted (RedactedOutput sentinel returned, not raised,
+because the side effect already executed) with a HIGH-severity
+output_denied_redacted audit row correlated by audit_id. Each must print PASS
+for the QA run to be green.
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from zemtik_govern.errors import (
 )
 from zemtik_govern.identity import StaticIdentity
 from zemtik_govern.injection import AgtInjectionClassifier
+from zemtik_govern.output import RedactedOutput, RegexPIIClassifier
 from zemtik_govern.policy import AgentOsPolicy
 from zemtik_govern.protocols import Decision
 
@@ -577,6 +582,112 @@ async def s15_budget_shadow_observes() -> None:
 
 
 # ---------------------------------------------------------------------------
+# S16 — Output seam: write-classified PII output → RedactedOutput + HIGH audit
+# ---------------------------------------------------------------------------
+async def s16_output_pii_redacted() -> None:
+    print("\n[S16] Output seam: write-classified PII output is redacted (sentinel returned)")
+    boundary = _boundary()
+    # Tee the real audit sink: capture each AuditEntry as it is written so the
+    # scenario can prove the HIGH-severity output_denied_redacted row exists and
+    # correlates by audit_id — while STILL exercising the real AgentMeshAudit
+    # (write delegates and returns its genuine id, the same id the sentinel carries).
+    # AgentMeshAudit delegates to agentmesh's opaque AuditLog and exposes no raw
+    # record list, so teeing at the Protocol boundary is how we read entries back.
+    class _RecordingAudit:
+        def __init__(self, inner: AgentMeshAudit) -> None:
+            self._inner = inner
+            self.entries: list = []
+
+        async def write(self, entry) -> str:
+            event_id = await self._inner.write(entry)
+            self.entries.append((event_id, entry))
+            return event_id
+
+        def verify_integrity(self):
+            return self._inner.verify_integrity()
+
+    audit = _RecordingAudit(AgentMeshAudit(boundary))
+    # Wire the PII rail in enforce mode and classify the demo action as WRITE.
+    # A write-classified tool whose output trips a rail RETURNS RedactedOutput
+    # instead of raising — the side effect already executed (#40 asymmetry).
+    gov = ZemtikGovern(
+        identity=StaticIdentity(boundary),
+        policy=AgentOsPolicy(boundary, rules=[_ALLOW_TOOL_RUN]),
+        audit=audit,
+        mode="strict",
+        output_classifiers=[RegexPIIClassifier(threshold=0.0, mode="enforce")],
+        tool_io_map={"tool.run": "write"},
+    )
+
+    # The tool returns a value containing an email address (PII).
+    # The pii rail matches email shapes, so it will fire.
+    _PII_EMAIL = "alice@example.com"
+
+    async def _tool_with_pii() -> str:
+        return f"result: user email is {_PII_EMAIL}"
+
+    proxy = gov.proxy(_tool_with_pii, action="tool.run", subject="qa-agent")
+    result = await proxy()
+
+    # --- assertion 1: returned value IS a RedactedOutput sentinel ----------------
+    check(
+        "Return value is RedactedOutput (not the raw PII string)",
+        isinstance(result, RedactedOutput),
+        f"got {type(result).__name__}: {result!r}",
+    )
+
+    # --- assertion 2: the raw PII email is NOT recoverable via str() -------------
+    sentinel_str = str(result)
+    check(
+        "Raw PII email NOT recoverable via str(RedactedOutput) (no-echo)",
+        _PII_EMAIL not in sentinel_str,
+        f"str() leaked: {sentinel_str!r}",
+    )
+
+    # --- assertion 3: a HIGH-severity output_denied_redacted row was written -----
+    redaction_rows = [
+        (eid, e) for eid, e in audit.entries
+        if e.event_type == "output_denied_redacted"
+    ]
+    check(
+        "Audit has exactly one output_denied_redacted row",
+        len(redaction_rows) == 1,
+        f"found {len(redaction_rows)} (events: {[e.event_type for _, e in audit.entries]})",
+    )
+    redaction_id, redaction_entry = redaction_rows[0]
+    check(
+        "The redaction row is tagged severity=HIGH (SIEM filterable)",
+        redaction_entry.severity == "HIGH",
+        f"severity={redaction_entry.severity!r}",
+    )
+
+    # --- assertion 4: the sentinel correlates to that row by audit_id (D9) -------
+    sentinel_audit_id = object.__getattribute__(result, "audit_id")
+    check(
+        "sentinel.audit_id == the redaction row's audit_id (D9 correlation)",
+        sentinel_audit_id == redaction_id and bool(sentinel_audit_id),
+        f"sentinel={sentinel_audit_id!r} row={redaction_id!r}",
+    )
+
+    # --- assertion 5: integrity holds, and no audited row echoes the raw PII -----
+    ok, err = audit.verify_integrity()
+    check("Audit chain verifies after PII redaction (Merkle-intact)", ok, err)
+    # Scan BOTH the rail-reason field and the carried payload — a row leaks PII if
+    # the raw email survives in either. (Output rows never echo the value by design;
+    # this proves it rather than asserting only against the one field we expect.)
+    leaked = [
+        e.event_type
+        for _, e in audit.entries
+        if _PII_EMAIL in str(e.policy_decision) or _PII_EMAIL in str(e.payload)
+    ]
+    check(
+        "No-echo (D6): no audited row records the raw PII email",
+        not leaked and _PII_EMAIL not in sentinel_str,
+        f"rows leaking PII: {leaked!r}",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 async def main() -> None:
@@ -600,6 +711,7 @@ async def main() -> None:
         s13_error_codes_and_audit_id,
         s14_injection_shadow_observes,
         s15_budget_shadow_observes,
+        s16_output_pii_redacted,
     ]
 
     passed = 0
