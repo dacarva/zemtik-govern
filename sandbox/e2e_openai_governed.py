@@ -14,12 +14,6 @@ audited. At the end we read the durable trail back with AuditReader, verify its
 Merkle/HMAC integrity, prove the denied writes never touched the DB, and emit a
 full governance report (markdown + machine-readable JSON).
 
-The deterministic probe section additionally drives the modules a non-deterministic
-model can't reliably trigger — including the **output seam** (#39/#40), which screens
-a tool's RETURN value for PII: a read tool raises and withholds the value, a write
-tool returns a RedactedOutput sentinel correlated to a HIGH-severity audit row, and
-a clean output passes through.
-
 Run:
     1. echo 'OPENAI_API_KEY=sk-...' >> .env          # gitignored
     2. source .venv/bin/activate
@@ -245,14 +239,9 @@ async def run_module_probes(secret: str) -> dict:
     from zemtik_govern.audit import AgentMeshAudit
     from zemtik_govern.context import GovernanceContext
     from zemtik_govern.core import ZemtikGovern
-    from zemtik_govern.errors import (
-        DecisionBudgetExceeded,
-        GovernanceDenied,
-        OutputGovernanceDenied,
-    )
+    from zemtik_govern.errors import DecisionBudgetExceeded, GovernanceDenied
     from zemtik_govern.identity import StaticIdentity
     from zemtik_govern.injection import AgtInjectionClassifier
-    from zemtik_govern.output import RedactedOutput, RegexPIIClassifier
     from zemtik_govern.policy import AgentOsPolicy
     from zemtik_govern.protocols import Decision
 
@@ -432,152 +421,6 @@ async def run_module_probes(secret: str) -> dict:
         "passed": bool(
             denied and denied.code == "policy_denied" and denied.guard == "policy"
             and denied.audit_id == denied.decision.audit_event_id
-        ),
-    })
-
-    # P6 — Output seam (#39/#40): the post-invocation rail that screens a tool's
-    # RETURN value for PII, INSIDE proxy(). A non-deterministic model can't be relied
-    # on to make a tool emit PII on cue, so the seam is driven directly. It proves the
-    # full read/write asymmetry on the SAME real pipeline:
-    #   * a READ tool whose output trips the PII rail RAISES (value withheld);
-    #   * a WRITE tool (side effect already ran) RETURNS a RedactedOutput sentinel,
-    #     correlated by audit_id to a HIGH-severity output_denied_redacted row, and
-    #     unwrap() turns that sentinel into an OutputGovernanceDenied (same type,
-    #     carrying the same audit_id);
-    #   * a clean output passes through untouched.
-    # No-echo (D6): the PII never appears in the raise message, the sentinel's str(),
-    # or the audit row itself — only the rail name and PII *kind*.
-    #
-    # A recording tee captures every AuditEntry while still delegating the write to
-    # the SHARED sink, so the output rows stay on the one tamper-evident trail
-    # (verify_integrity below still covers them) AND we can read them back to assert
-    # the row's severity/event_type/no-echo — not just that the chain hashes.
-    class _RecordingAudit:
-        def __init__(self, inner: AgentMeshAudit) -> None:
-            self._inner = inner
-            self.entries: list = []
-
-        async def write(self, entry) -> str:
-            event_id = await self._inner.write(entry)
-            self.entries.append((event_id, entry))
-            return event_id
-
-        def verify_integrity(self):
-            return self._inner.verify_integrity()
-
-    pii_record = "customer Dana Lee — email dana.lee@example.com, SSN 123-45-6789"
-    pii_email = "dana.lee@example.com"
-    pii_ssn = "123-45-6789"
-    pii_tokens = (pii_email, pii_ssn, pii_record)
-    read_allow = {
-        "name": "allow-profile-read",
-        "condition": {"field": "action", "operator": "eq", "value": "profile.read"},
-        "action": "allow",
-    }
-    write_allow = {
-        "name": "allow-statement-export",
-        "condition": {"field": "action", "operator": "eq", "value": "statement.export"},
-        "action": "allow",
-    }
-    rec_audit = _RecordingAudit(audit)
-    out_gov = ZemtikGovern(
-        identity=StaticIdentity(boundary),
-        policy=AgentOsPolicy(boundary, rules=[read_allow, write_allow]),
-        audit=rec_audit,
-        mode="enforce",
-        output_classifiers=[RegexPIIClassifier(threshold=0.0, mode="enforce")],
-        tool_io_map={"profile.read": "read", "statement.export": "write"},
-    )
-
-    clean_output = "balance summary: 3 accounts, all in good standing"
-    export_calls = 0  # proves the WRITE side effect actually ran before redaction
-
-    async def _read_clean(**_kw) -> str:
-        return clean_output
-
-    async def _read_pii(**_kw) -> str:
-        return pii_record
-
-    async def _export_pii(**_kw) -> str:
-        nonlocal export_calls
-        export_calls += 1
-        return pii_record
-
-    clean = await out_gov.proxy(_read_clean, action="profile.read", subject="probe")()
-
-    raised: OutputGovernanceDenied | None = None
-    try:
-        await out_gov.proxy(_read_pii, action="profile.read", subject="probe")()
-    except OutputGovernanceDenied as exc:
-        raised = exc
-
-    sentinel = await out_gov.proxy(_export_pii, action="statement.export", subject="probe")()
-    is_sentinel = isinstance(sentinel, RedactedOutput)
-    # Bypass the sentinel's poison __getattr__ to read its back-link id (D9).
-    sentinel_aid = object.__getattribute__(sentinel, "audit_id") if is_sentinel else None
-
-    unwrapped: OutputGovernanceDenied | None = None
-    try:
-        out_gov.unwrap(sentinel)
-    except OutputGovernanceDenied as exc:
-        unwrapped = exc
-
-    # Read the redaction row back off the shared trail: it must be the HIGH-severity
-    # output_denied_redacted event, carry the SAME audit_id the sentinel exposes, and
-    # leak none of the PII into its own fields.
-    redaction_rows = [
-        (eid, e) for eid, e in rec_audit.entries
-        if e.event_type == "output_denied_redacted"
-    ]
-    redaction_ok = len(redaction_rows) == 1
-    row_high = redaction_ok and redaction_rows[0][1].severity == "HIGH"
-    audit_id_correlates = redaction_ok and redaction_rows[0][0] == sentinel_aid == (
-        unwrapped.audit_id if unwrapped else None
-    )
-    # Scan the WHOLE serialized row (every field), not just policy_decision/payload
-    # — those two structurally cannot hold the tool's RETURN value, so checking only
-    # them would be a vacuous no-echo proof. The full repr is the real test: if any
-    # field ever carried the redacted value, it would surface here.
-    row_no_echo = redaction_ok and not any(
-        tok in str(redaction_rows[0][1]) for tok in pii_tokens
-    )
-    # Strongest no-echo proof: read the DURABLE, signed JSONL back off disk and scan
-    # every persisted byte. This catches a serializer or audit-writer that leaks the
-    # value to the trail even when the in-memory entry looks clean, and it covers the
-    # READ-deny row too (not just the write-redact row). The file holds every probe's
-    # rows; none — read-deny or write-redact — may contain the PII.
-    persisted = (
-        MODULES_AUDIT_FILE.read_text(encoding="utf-8")
-        if MODULES_AUDIT_FILE.exists() else ""
-    )
-    persisted_no_echo = bool(persisted) and not any(tok in persisted for tok in pii_tokens)
-
-    # No-echo across every surface the caller can observe — email AND ssn AND the
-    # full record, on all three raise/return surfaces.
-    no_echo = all(
-        tok not in (raised.args[0] if raised else "")
-        and tok not in str(sentinel)
-        and tok not in (unwrapped.args[0] if unwrapped else "")
-        for tok in pii_tokens
-    )
-    results.append({
-        "module": "output seam (#39/#40)",
-        "proves": "a tool's RETURN value is screened for PII: reads raise, "
-                  "writes redact (HIGH-severity, audit-correlated), clean passes",
-        "evidence": (
-            f"clean read passes verbatim={clean == clean_output}; "
-            f"read PII raises (rail={raised.rail if raised else None}); "
-            f"write side-effect ran ({export_calls}x) → RedactedOutput → HIGH row, "
-            f"audit_id correlates={audit_id_correlates}; "
-            f"no-echo (caller+row+durable trail)={no_echo and row_no_echo and persisted_no_echo}"
-        ),
-        "passed": bool(
-            clean == clean_output
-            and raised and raised.rail == "pii" and raised.audit_id
-            and is_sentinel and export_calls == 1
-            and unwrapped and unwrapped.audit_id
-            and redaction_ok and row_high and audit_id_correlates and row_no_echo
-            and no_echo and persisted_no_echo
         ),
     })
 
@@ -891,8 +734,7 @@ def render_markdown(r: dict, secret: str) -> str:
     if r.get("modules"):
         w("## Security modules exercised\n")
         w("The modules below cannot be reliably triggered by a non-deterministic "
-          "model (a hung seam, a shadow stance, a duplicate key, a PII-laden return), "
-          "so they are driven "
+          "model (a hung seam, a shadow stance, a duplicate key), so they are driven "
           "deterministically against the SAME real three-seam pipeline and recorded "
           "on their own verifiable trail "
           f"(`{MODULES_AUDIT_FILE.relative_to(REPO_ROOT)}`).\n")

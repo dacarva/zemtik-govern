@@ -276,82 +276,6 @@ with `O_NOFOLLOW` to prevent symlink redirection attacks.
 
 ---
 
----
-
-### `output_screening`
-
-Master switch for the post-invocation output rail seam. **Off by default** (`false`).
-When `true`, `proxy()` screens every tool return through the configured rails
-before handing it back to the caller. Has no effect on direct `govern()` /
-`govern_sync()` callers — those paths are input-only.
-
-```yaml
-output_screening: true
-```
-
----
-
-### `tool_io_map`
-
-Classifies each action as `read` or `write` for the output seam.
-
-```yaml
-tool_io_map:
-  tool.query: read     # a PII hit raises OutputGovernanceDenied (value withheld)
-  payment.send: write  # a PII hit returns RedactedOutput (HIGH-severity audit row)
-```
-
-| Classification | Enforce rail hit | Audit event | Severity |
-|----------------|-----------------|-------------|----------|
-| `read` | `OutputGovernanceDenied` raised | `output_denied_raised` | — |
-| `write` | `RedactedOutput` sentinel returned | `output_denied_redacted` | HIGH |
-
-**Unmapped actions default to `write` (fail-closed).** The governor logs a
-one-time WARNING per unmapped action on the first call, so a forgotten read tool
-is caught in dev/staging before it ships as a silently-redacted write in
-production.
-
----
-
-### `rails`
-
-Per-rail configuration table. Each key is a rail name; C0 ships `pii`
-(`RegexPIIClassifier`). Each entry has two optional fields:
-
-```yaml
-rails:
-  pii:
-    threshold: 0.0    # 0.0–1.0; regex rail is binary (confidence 1.0),
-                      # so any threshold ≤ 1.0 lets it fire
-    mode: shadow      # enforce | shadow (independent of global mode)
-```
-
-| Field | Values | Default | Meaning |
-|-------|--------|---------|---------|
-| `threshold` | `0.0`–`1.0` | `0.0` | Minimum confidence to trigger the rail. The regex PII rail is binary; scoring providers (C1 roadmap) surface real confidences. |
-| `mode` | `enforce` \| `shadow` | `enforce` | `enforce`: block (raise / redact). `shadow`: observe would-deny, return value unblocked. |
-
-A typo'd mode or an out-of-range threshold is a startup error
-(`GovernanceNotConfigured`).
-
-**Observe-then-enforce onboarding:**
-
-```yaml
-# Step 1 — ship in shadow, watch audit for output_would_deny rows.
-rails:
-  pii:
-    threshold: 0.0
-    mode: shadow
-
-# Step 2 — after a release with no false-denies, enforce.
-rails:
-  pii:
-    threshold: 0.0
-    mode: enforce
-```
-
----
-
 ## `GovernanceConfig` Python API
 
 ```python
@@ -368,9 +292,6 @@ class GovernanceConfig:
     injection_mode: str = "enforce"          # per-guard shadow (D10)
     budget_mode: str = "enforce"             # per-guard shadow (D10)
     injection_confidence_floor: float = 0.0  # reserved; off by default (D5)
-    output_screening: bool = False           # opt-in; proxy() only
-    tool_io_map: Mapping[str, str] = {}      # action → "read" | "write"
-    rails: tuple[RailConfig, ...] = ()       # per-rail threshold + mode
 ```
 
 ### `classmethod load(path: str | Path) → GovernanceConfig`

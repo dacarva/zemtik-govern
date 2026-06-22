@@ -24,9 +24,8 @@ policy source.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -64,50 +63,6 @@ _DEFAULT_DECISION_BUDGET_SECONDS: float = 5.0
 # memory-constrained or high-cardinality-key deployments.
 _DEFAULT_IDEM_MAX_ENTRIES: int = 10_000
 _DEFAULT_IDEM_TTL_SECONDS: float = 3600.0
-
-
-# Output tool I/O classification (#39). An action maps to ``read`` or ``write``;
-# an unmapped action defaults to ``write`` at the seam (fail-closed). Validated
-# here so a typo'd classification is a startup error, not a silent miss.
-VALID_IO_CLASSES: tuple[str, ...] = ("read", "write")
-
-# Output-rail defaults: a rail observes (``shadow``) or blocks (``enforce``), with
-# a confidence ``threshold`` honored per-provider (the regex PII rail is binary;
-# scoring providers like Presidio surface real confidences in C1). 0.0 = every
-# detection counts.
-_DEFAULT_RAIL_THRESHOLD: float = 0.0
-
-
-@dataclass(frozen=True)
-class RailConfig:
-    """One output rail's tuning: which rail, its confidence ``threshold``, and its
-    ``mode`` (``enforce`` blocks, ``shadow`` observes). Frozen value object; the
-    C0 seam ships one rail (``pii``), more arrive with the C1 ensemble."""
-
-    name: str
-    threshold: float = _DEFAULT_RAIL_THRESHOLD
-    mode: str = _DEFAULT_GUARD_MODE
-
-    def __post_init__(self) -> None:
-        if not self.name or not isinstance(self.name, str):
-            raise GovernanceNotConfigured(
-                f"rail name must be a non-empty string, got {self.name!r}"
-            )
-        if self.mode not in VALID_GUARD_MODES:
-            raise GovernanceNotConfigured(
-                f"rail {self.name!r} mode must be one of {VALID_GUARD_MODES}, got {self.mode!r}"
-            )
-        thr = self.threshold
-        if isinstance(thr, bool) or not isinstance(thr, (int, float)):
-            raise GovernanceNotConfigured(
-                f"rail {self.name!r} threshold must be a number in [0.0, 1.0], "
-                f"got {type(thr).__name__}"
-            )
-        if not (0.0 <= thr <= 1.0):
-            raise GovernanceNotConfigured(
-                f"rail {self.name!r} threshold must be in [0.0, 1.0], got {thr!r}"
-            )
-        object.__setattr__(self, "threshold", float(thr))
 
 
 @dataclass(frozen=True)
@@ -154,14 +109,6 @@ class GovernanceConfig:
     # paranoid-mode dial; see the module constant. Documented off-by-default in
     # docs/configuration-reference.md.
     injection_confidence_floor: float = _DEFAULT_INJECTION_CONFIDENCE_FLOOR
-    # Output-governance seam (#39, C0). ``output_screening`` enables the
-    # post-invocation rail seam in proxy() (off by default — opt-in). ``tool_io_map``
-    # classifies each action ``read``|``write`` (unmapped → ``write`` at the seam,
-    # fail-closed). ``rails`` is the per-rail threshold/mode table. All three are
-    # validated at startup, same discipline as every other field.
-    output_screening: bool = False
-    tool_io_map: Mapping[str, str] = field(default_factory=dict)
-    rails: tuple[RailConfig, ...] = ()
 
     def __post_init__(self) -> None:
         """Validate the config, raising :class:`GovernanceNotConfigured` on any insecure shape.
@@ -180,7 +127,6 @@ class GovernanceConfig:
         self._validate_idempotency_caps()
         self._validate_guard_modes()
         self._validate_confidence_floor()
-        self._validate_output_seam()
         # Universal: no mode is allowed to run without somewhere to record outcomes.
         if not self.audit_sink:
             raise GovernanceNotConfigured(
@@ -216,7 +162,9 @@ class GovernanceConfig:
                 f"got {type(budget).__name__}"
             )
         if budget <= 0:
-            raise GovernanceNotConfigured(f"decision_budget_seconds must be > 0, got {budget!r}")
+            raise GovernanceNotConfigured(
+                f"decision_budget_seconds must be > 0, got {budget!r}"
+            )
 
     def _validate_idempotency_caps(self) -> None:
         """The cache cap must be a positive int; the TTL, if present, a positive
@@ -263,33 +211,6 @@ class GovernanceConfig:
             raise GovernanceNotConfigured(
                 f"injection_confidence_floor must be in [0.0, 1.0], got {floor!r}"
             )
-
-    def _validate_output_seam(self) -> None:
-        """Validate the output-seam fields (#39). ``output_screening`` must be a
-        bool; every ``tool_io_map`` value must be ``read``/``write``; ``rails`` must
-        be ``RailConfig`` instances (each self-validating). Normalises the io map to
-        an immutable view and rails to a tuple. A typo here is a startup error."""
-        if not isinstance(self.output_screening, bool):
-            raise GovernanceNotConfigured(
-                f"output_screening must be a bool, got {type(self.output_screening).__name__}"
-            )
-        io_map = dict(self.tool_io_map)
-        for action, cls in io_map.items():
-            if cls not in VALID_IO_CLASSES:
-                raise GovernanceNotConfigured(
-                    f"tool_io_map[{action!r}] must be one of {VALID_IO_CLASSES}, got {cls!r}"
-                )
-        object.__setattr__(self, "tool_io_map", MappingProxyType(io_map))
-        rails = tuple(self.rails)
-        for r in rails:
-            if not isinstance(r, RailConfig):
-                raise GovernanceNotConfigured(
-                    f"rails entries must be RailConfig, got {type(r).__name__}"
-                )
-        names = [r.name for r in rails]
-        if len(names) != len(set(names)):
-            raise GovernanceNotConfigured(f"duplicate rail name(s) in {names}")
-        object.__setattr__(self, "rails", rails)
 
     def _validate_policy_source(self) -> None:
         """Raise if an enforcing mode has no usable policy source (no rules AND no policy_dir)."""
@@ -339,10 +260,13 @@ class GovernanceConfig:
         cap = data.get("idempotency_max_entries", _DEFAULT_IDEM_MAX_ENTRIES)
         if isinstance(cap, bool) or not isinstance(cap, int):
             raise GovernanceNotConfigured(
-                f"config 'idempotency_max_entries' must be an int, got {type(cap).__name__}"
+                "config 'idempotency_max_entries' must be an int, "
+                f"got {type(cap).__name__}"
             )
         ttl = data.get("idempotency_ttl_seconds", _DEFAULT_IDEM_TTL_SECONDS)
-        if ttl is not None and (isinstance(ttl, bool) or not isinstance(ttl, (int, float))):
+        if ttl is not None and (
+            isinstance(ttl, bool) or not isinstance(ttl, (int, float))
+        ):
             raise GovernanceNotConfigured(
                 "config 'idempotency_ttl_seconds' must be a number of seconds or null, "
                 f"got {type(ttl).__name__}"
@@ -362,23 +286,20 @@ class GovernanceConfig:
         injection_mode = str(
             injection_block.get("mode", data.get("injection_mode", _DEFAULT_GUARD_MODE))
         )
-        budget_mode = str(budget_block.get("mode", data.get("budget_mode", _DEFAULT_GUARD_MODE)))
+        budget_mode = str(
+            budget_block.get("mode", data.get("budget_mode", _DEFAULT_GUARD_MODE))
+        )
         floor = injection_block.get(
             "confidence_floor",
-            data.get("injection_confidence_floor", _DEFAULT_INJECTION_CONFIDENCE_FLOOR),
+            data.get(
+                "injection_confidence_floor", _DEFAULT_INJECTION_CONFIDENCE_FLOOR
+            ),
         )
         if isinstance(floor, bool) or not isinstance(floor, (int, float)):
             raise GovernanceNotConfigured(
                 "config 'injection_confidence_floor' must be a number in [0.0, 1.0], "
                 f"got {type(floor).__name__}"
             )
-        output_screening = data.get("output_screening", False)
-        if not isinstance(output_screening, bool):
-            raise GovernanceNotConfigured(
-                f"config 'output_screening' must be a bool, got {type(output_screening).__name__}"
-            )
-        tool_io_map = cls._parse_tool_io_map(data.get("tool_io_map"))
-        rails = cls._parse_rails(data.get("rails"))
         return cls(
             mode=str(data.get("mode", "strict")),
             rules=tuple(rules),
@@ -391,52 +312,7 @@ class GovernanceConfig:
             injection_mode=injection_mode,
             budget_mode=budget_mode,
             injection_confidence_floor=float(floor),
-            output_screening=output_screening,
-            tool_io_map=tool_io_map,
-            rails=rails,
         )
-
-    @staticmethod
-    def _parse_tool_io_map(raw: Any) -> dict[str, str]:
-        """Coerce the ``tool_io_map`` block to a plain ``{action: class}`` dict.
-        Value validation (``read``/``write``) is left to ``__post_init__`` so the
-        same check covers both the from_mapping and direct-construction paths."""
-        if raw is None:
-            return {}
-        if not isinstance(raw, Mapping):
-            raise GovernanceNotConfigured(
-                f"config 'tool_io_map' must be a mapping, got {type(raw).__name__}"
-            )
-        return {str(k): v for k, v in raw.items()}
-
-    @staticmethod
-    def _parse_rails(raw: Any) -> tuple[RailConfig, ...]:
-        """Parse the ``rails`` block — a ``{name: {threshold, mode}}`` mapping — into
-        a tuple of :class:`RailConfig`. Each entry self-validates on construction."""
-        if raw is None:
-            return ()
-        if not isinstance(raw, Mapping):
-            raise GovernanceNotConfigured(
-                f"config 'rails' must be a mapping of rail name to settings, "
-                f"got {type(raw).__name__}"
-            )
-        out: list[RailConfig] = []
-        for name, settings in raw.items():
-            if settings is None:
-                settings = {}
-            if not isinstance(settings, Mapping):
-                raise GovernanceNotConfigured(
-                    f"config rails[{name!r}] must be a mapping (e.g. "
-                    f"{{threshold: 0.5, mode: shadow}}), got {type(settings).__name__}"
-                )
-            out.append(
-                RailConfig(
-                    name=str(name),
-                    threshold=settings.get("threshold", _DEFAULT_RAIL_THRESHOLD),
-                    mode=str(settings.get("mode", _DEFAULT_GUARD_MODE)),
-                )
-            )
-        return tuple(out)
 
     @staticmethod
     def _guard_block(data: Mapping[str, Any], name: str) -> Mapping[str, Any]:

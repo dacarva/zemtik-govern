@@ -104,7 +104,7 @@ governed_fn = gov.proxy(my_tool, action="tool.run", subject="agent-1")
 result = await governed_fn(q="hello")
 ```
 
-In `strict`/`enforce` mode the injection guard is always on. By default it uses AGT's own vetted detection rules (no config needed); set `injection_rules_path` only to pin a version or diverge — [`policies/prompt-injection.yaml`](policies/prompt-injection.yaml) is a ready-to-edit snapshot of those defaults. A file `audit_sink` requires an HMAC secret in `$ZEMTIK_AUDIT_SECRET`. See [`zemtik.example.yaml`](zemtik.example.yaml) for the full annotated configuration. To watch the injection guard deny a poisoned argument, run scenario S11 in `sandbox/qa_demo.py` (S14 for the per-guard shadow stance, S16 for the output seam redacting PII; see [Sandbox & Demos](#sandbox--demos)).
+In `strict`/`enforce` mode the injection guard is always on. By default it uses AGT's own vetted detection rules (no config needed); set `injection_rules_path` only to pin a version or diverge — [`policies/prompt-injection.yaml`](policies/prompt-injection.yaml) is a ready-to-edit snapshot of those defaults. A file `audit_sink` requires an HMAC secret in `$ZEMTIK_AUDIT_SECRET`. See [`zemtik.example.yaml`](zemtik.example.yaml) for the full annotated configuration. To watch the injection guard deny a poisoned argument, run scenario S11 in `sandbox/qa_demo.py` (and S14 for the per-guard shadow stance; see [Sandbox & Demos](#sandbox--demos)).
 
 ## Security model
 
@@ -128,19 +128,6 @@ Every failure is a typed, catchable exception carrying a stable `.code` and `.gu
 | `DecisionBudgetExceeded` | A seam outran the decision budget; fail-closed. Raised when `budget` enforces; under `budget: {mode: shadow}` the breach is logged, not raised. Carries `.limit_seconds` / `.elapsed_seconds`. |
 | `GovernanceError` | A system fault in a seam; the tool was blocked. |
 | `GovernanceNotConfigured` | Insecure startup config; raised at boot, not request time. |
-| `OutputGovernanceDenied` | An output rail blocked a tool's **return value** (read-classified tool, or an unscreenable/non-JSON return); fail-closed. Carries `.rail` and `.audit_id`. Raised in `strict`/`enforce`; a `shadow` rail observes a would-deny instead. |
-
-### Output seam (opt-in, `proxy()` only)
-
-Beyond the input pipeline, an optional post-invocation **output seam** screens a tool's *return value* through PII rails — enabled with `output_screening: true` and only inside `proxy()` (direct `govern()`/`govern_sync()` callers are input-only). The deny shape splits by the tool's `tool_io_map` classification, because by the time output is screened a write has already executed:
-
-| Audit event | Effect | Caller sees |
-|-------------|--------|-------------|
-| `output_allowed` | clean | the real value |
-| `output_denied_raised` | read-classified hit | `OutputGovernanceDenied` raised |
-| `output_denied_redacted` | write-classified hit (side effect already ran) | a `RedactedOutput` sentinel (HIGH-severity audit row) |
-
-`RedactedOutput` is a poison sentinel: `str()`/`repr()` are safe (`<output redacted: audit_id=…>`) but attribute/item/iter access raises `RedactedOutputAccessError`. Wrap every governed result in `gov.unwrap(result)` for one uniform contract — it returns a clean value and raises `OutputGovernanceDenied` on a redacted one. The rail names itself and its tunable knob in the deny, never the offending value (no-echo). Watch it live with scenario **S16** in `sandbox/qa_demo.py`. See [Configuration Reference](docs/configuration-reference.md) and the [Integration Guide](docs/integration-guide.md) for the `rails` / `tool_io_map` config and the observe→enforce rollout.
 
 ## Documentation
 
@@ -159,9 +146,8 @@ Runnable demos live in [`sandbox/`](sandbox/) and exercise the real pipeline aga
 ```bash
 source .venv/bin/activate
 
-# Three-seam scenarios S1–S16: allow, deny, fail-closed, idempotency, the
-# injection guard, the decision budget, error codes/audit_id, per-guard shadow,
-# and the output seam redacting PII (S16)
+# Three-seam scenarios S1–S15: allow, deny, fail-closed, idempotency, the
+# injection guard, the decision budget, error codes/audit_id, per-guard shadow
 ZEMTIK_AUDIT_SECRET=qa-test-secret python sandbox/qa_demo.py
 
 # Audit trail: verify Merkle/HMAC, extract proofs, detect tampering
@@ -171,8 +157,7 @@ ZEMTIK_AUDIT_SECRET=audit-secret python sandbox/auditor.py
 ZEMTIK_AUDIT_SECRET=dogfood-secret python sandbox/dogfood_cutover.py
 
 # A real gpt-5.4-nano agent governed end to end, plus a 15-prompt injection
-# battery and deterministic module probes — including the output seam redacting
-# PII from a tool's return (needs [langchain,openai] + an OpenAI key)
+# battery and deterministic module probes (needs [langchain,openai] + an OpenAI key)
 uv pip install -e ".[dev,langchain,openai]"
 cp .env.example .env   # then set OPENAI_API_KEY in .env (gitignored)
 python sandbox/e2e_openai_governed.py

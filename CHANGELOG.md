@@ -4,62 +4,6 @@ All notable changes to zemtik-govern are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project versions
 via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
 
-## [0.4.0.0] - 2026-06-22 — output-governance rail layer (C0)
-
-The first output-governance rail: a post-invocation seam that screens a tool's
-**return value** for PII inside `proxy()`, complementing the input pipeline
-(identity → policy → audit). Opt-in (`output_screening: true`), fail-closed, and
-no-echo throughout.
-
-### Added
-
-- **Output-governance seam — read-deny path (#39).** After a governed tool
-  returns, `proxy()` projects its value to text and screens it through the
-  configured output rails. A `read`-classified tool whose output trips an enforce
-  rail has its value **withheld** and `OutputGovernanceDenied` raised. Ships ONE
-  concrete rail, `RegexPIIClassifier` (name `pii`): linear-time, ReDoS-safe
-  anchored patterns for email/SSN/card/phone, NFKC-normalised before scan. An
-  unscreenable return (custom object, non-UTF-8 bytes, oversized, over-deep) is a
-  fail-closed deny. Config: `output_screening`, `tool_io_map` (action → read|write,
-  unmapped → write), `rails` (per-rail `threshold` + `mode`).
-- **Write-deny path + `RedactedOutput` sentinel (#40).** A `write`-classified tool
-  (its side effect already executed) whose output trips an enforce rail **returns**
-  a frozen `RedactedOutput` sentinel and writes a HIGH-severity
-  `output_denied_redacted` audit row. The sentinel is spare on `str`/`repr`/`format`
-  (returns `<output redacted: audit_id=…>`) and poison on attribute/item/iter
-  access (`RedactedOutputAccessError`); `audit_id` back-links to the row (D9).
-- **Discoverability — startup banner + warn-once (#42).** The startup log line
-  announces active rail names/modes and the `tool_io_map`. When the seam is active
-  and an action is absent from `tool_io_map`, a one-time WARNING per action fires
-  (caught in dev/staging before a forgotten read tool ships as a silently-redacted
-  write).
-- **`gov.unwrap()` + per-rail output shadow mode (#41).** `unwrap(result)`
-  collapses the read-raises / write-returns asymmetry into one contract — clean
-  value through, `RedactedOutput` raises `OutputGovernanceDenied` (carrying the
-  sentinel's `audit_id`). Each rail honors its own `mode`: a `shadow` rail observes
-  a would-deny (`output_would_deny`) without enforcing, for an observe→enforce
-  rollout independent of the global mode.
-- **Output-seam documentation (#43).** `zemtik.example.yaml` annotates
-  `output_screening`, `tool_io_map`, and `rails` with an observe→enforce onboarding
-  block. `docs/configuration-reference.md`, `docs/integration-guide.md`,
-  `docs/architecture.md`, and the README document the fields, the `gov.unwrap()`
-  caller contract, `OutputGovernanceDenied` / `RedactedOutputAccessError`, the
-  audit-name→effect mapping, and the proxy()-only scope.
-- **Sandbox S16 — output PII redaction** (`sandbox/qa_demo.py`). A write-classified
-  tool returning PII is redacted: `RedactedOutput` returned (not raised),
-  HIGH-severity `output_denied_redacted` row, `audit_id` correlated to the row (D9),
-  raw PII not recoverable via `str()` (D6 no-echo), Merkle chain verifies. Suite
-  covers S1–S16 (16 passed).
-- **E2E output-seam probe (`sandbox/e2e_openai_governed.py`).** A deterministic P6
-  probe drives the output seam on the real three-seam pipeline: a read tool raises
-  and withholds, a write tool returns `RedactedOutput` correlated by `audit_id` to
-  a HIGH-severity row, `unwrap()` collapses to a raise, a clean output passes
-  verbatim, and the write side effect is proven to have run exactly once. No-echo is
-  asserted across the caller surfaces, the full audit row, and the durable signed
-  JSONL trail. Documented in the README and `docs/sandbox.md`.
-
----
-
 ## [0.3.0.0] - 2026-06-22
 
 ### BREAKING

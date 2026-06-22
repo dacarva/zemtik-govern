@@ -23,21 +23,8 @@ from typing import Any
 
 from ._cache import BoundedTTLDict
 from .context import GovernanceContext
-from .errors import (
-    DecisionBudgetExceeded,
-    GovernanceDenied,
-    GovernanceError,
-    OutputGovernanceDenied,
-)
+from .errors import DecisionBudgetExceeded, GovernanceDenied, GovernanceError
 from .injection import GuardedEngine, InjectionClassifier
-from .output import (
-    IO_READ,
-    IO_WRITE,
-    OutputClassifier,
-    OutputExtractionError,
-    extract_text,
-    resolve_io,
-)
 from .protocols import (
     AuditEntry,
     AuditSink,
@@ -166,7 +153,6 @@ def _request_fingerprint(ctx: GovernanceContext) -> str:
     )
     return hashlib.sha256(canonical.encode()).hexdigest()
 
-
 # Shadow mode observes without enforcing; every other mode enforces (raises on a
 # deny). Kept as a set so a typo in a mode string enforces by default — the safe
 # direction. Config validates the mode string at startup (GovernanceNotConfigured).
@@ -217,8 +203,6 @@ class ZemtikGovern:
         injection_classifier: InjectionClassifier | None = None,
         injection_mode: str = _GUARD_ENFORCE,
         budget_mode: str = _GUARD_ENFORCE,
-        output_classifiers: list[OutputClassifier] | None = None,
-        tool_io_map: Mapping[str, str] | None = None,
     ) -> None:
         """
         Args:
@@ -259,26 +243,6 @@ class ZemtikGovern:
         # the secure default; shadow is the explicit, temporary opt-out.
         self._injection_mode = injection_mode
         self._budget_mode = budget_mode
-        # Output-governance seam (#39, C0). When wired, proxy() screens each tool
-        # RETURN value through these classifiers after the tool runs, inside the
-        # effect path — so the screened value is what gets cached and a replay never
-        # re-leaks the unscreened original. Direct govern()/govern_sync() callers
-        # stay input-only (premise 2). ``tool_io_map`` classifies each action
-        # read|write (default write = fail-closed); a read-deny withholds the value
-        # and raises, a write-deny is the C1/#40 RedactedOutput path. Empty/None
-        # classifiers => the seam is inert and proxy() returns the raw value.
-        self._output_classifiers = list(output_classifiers or [])
-        self._tool_io_map = dict(tool_io_map or {})
-        # Warn-once registry for unmapped actions (Issue #42). When the output seam
-        # is active and _screen_output sees an action absent from _tool_io_map, it
-        # must warn ONCE — an action that silently defaults to write (fail-closed) is
-        # a MISCLASSIFIED tool waiting to be caught. But repeating the same warning
-        # on every call creates alert fatigue that operators learn to ignore. One
-        # warning per novel action is the right trust signal: it fires immediately on
-        # the first real call (when the operator can still fix the map before prod)
-        # and stays silent thereafter. asyncio is single-threaded so a plain set is
-        # safe without a lock.
-        self._output_warned_actions: set[str] = set()
         # The injected clock, reused by the budget guard to measure elapsed time
         # for a breach (and for a shadow-mode would-breach observation).
         self._time_fn = time_fn
@@ -316,25 +280,22 @@ class ZemtikGovern:
         )
         self._log_active_guards(idem_max_entries, idem_ttl_seconds)
 
-    def _log_active_guards(self, idem_max_entries: int, idem_ttl_seconds: float | None) -> None:
+    def _log_active_guards(
+        self, idem_max_entries: int, idem_ttl_seconds: float | None
+    ) -> None:
         """Announce the active guards once, at construction (D4/D7). Names whether
         injection detection is ON, the decision budget, and the cache caps — so an
-        upgrade that activates fail-closed defaults is visible, not silent.
-
-        Issue #42 — output seam discoverability: when output classifiers are wired,
-        also announces the active rail names/modes AND the tool_io_map so an operator
-        immediately sees what is classified and what will default to write (fail-closed).
-        The governor has no inventory of every possible action at construction time
-        (proxies are created lazily, and rails are PII classifiers that carry no
-        action names), so listing "unclassified actions" verbatim is not buildable.
-        The faithful, testable equivalent: surface the KNOWN io_map (so the operator
-        sees what IS declared) and state the fail-closed default — unmapped actions
-        default to write — so misclassified tools are caught at operator review time,
-        not silently in production."""
+        upgrade that activates fail-closed defaults is visible, not silent."""
         injection = (
-            f"ON (AGT, {self._injection_mode})" if self._injection_classifier is not None else "OFF"
+            f"ON (AGT, {self._injection_mode})"
+            if self._injection_classifier is not None
+            else "OFF"
         )
-        budget = f"{self._timeout}s ({self._budget_mode})" if self._timeout is not None else "OFF"
+        budget = (
+            f"{self._timeout}s ({self._budget_mode})"
+            if self._timeout is not None
+            else "OFF"
+        )
         _LOG.info(
             "zemtik-govern active | mode: %s | injection detection: %s | "
             "decision budget: %s | idempotency: cap=%s ttl=%s",
@@ -344,45 +305,12 @@ class ZemtikGovern:
             idem_max_entries,
             idem_ttl_seconds,
         )
-        if self._output_classifiers:
-            # Surface each rail's name; per-rail mode shown alongside the global
-            # mode in the banner so an operator sees shadow vs. enforce per rail.
-            rail_names = ", ".join(getattr(c, "name", "?") for c in self._output_classifiers)
-            # io_map lists explicitly classified actions; every unmapped action defaults
-            # to write (fail-closed). Both facts are surfaced here so an operator can
-            # spot a READ tool that was forgotten from the map before it ships and
-            # silently produces RedactedOutput in production.
-            io_map_repr = "{" + ", ".join(f"{k}: {v}" for k, v in self._tool_io_map.items()) + "}"
-            _LOG.info(
-                "output screening: ON (rails=%s, mode=%s) | "
-                "io_map=%s | unmapped actions default to write (fail-closed)",
-                rail_names,
-                self._mode,
-                io_map_repr,
-            )
 
     async def govern(self, ctx: GovernanceContext) -> Decision:
-        """Public entry point: identity → policy → audit, returns the Decision.
-
-        Delegates to :meth:`_govern_with_did`, which also surfaces the resolved DID
-        for the proxy's output seam to attribute its audit rows to (so an output
-        allow/deny is stamped with the SAME agent the input row names, not the
-        reserved unidentified DID). Direct callers only need the Decision."""
-        _did, decision = await self._govern_with_did(ctx)
-        return decision
-
-    async def _govern_with_did(self, ctx: GovernanceContext) -> tuple[str, Decision]:
-        """The full govern pipeline, returning ``(did, enforced_decision)``.
-
-        The DID is the identity-resolved subject (or the reserved unidentified DID
-        on a replay whose original resolved it). A deny still raises out of
-        ``_enforce`` exactly as before — the tuple is only returned on a non-raising
-        outcome (allow, or a shadow-mode observed would-deny), which is the only
-        case the output seam runs in anyway."""
         key = ctx.idempotency_key
         if key is None:
-            did, decision = await self._evaluate_and_audit(ctx)
-            return did, self._enforce(decision)
+            _, decision = await self._evaluate_and_audit(ctx)
+            return self._enforce(decision)
 
         # Idempotent path: serialise on the key so a concurrent duplicate is a
         # deterministic replay, never silently evaluated as a brand-new request.
@@ -458,16 +386,18 @@ class ZemtikGovern:
                             ctx, did, decision, outcome="replay", mode=self._mode
                         )
                     )
-                    return did, self._enforce(replace(decision, replayed=True))
+                    return self._enforce(replace(decision, replayed=True))
                 # Same request, new (mode, killswitch) stance: fall through to a
                 # fresh evaluation and cache it under this stance's bucket.
             did, decision = await self._evaluate_and_audit(ctx)
             # Cache only a completed evaluation; a fail-closed system error raises
             # out of _evaluate_and_audit and is left un-cached so a retry re-runs.
             self._store_decision(key, fingerprint, did, decision)
-            return did, self._enforce(decision)
+            return self._enforce(decision)
 
-    async def _evaluate_and_audit(self, ctx: GovernanceContext) -> tuple[str, Decision]:
+    async def _evaluate_and_audit(
+        self, ctx: GovernanceContext
+    ) -> tuple[str, Decision]:
         """Identity → policy → audit, inside the fail-closed boundary.
 
         A fault in EITHER identity or policy is a system denial, audited then
@@ -492,7 +422,9 @@ class ZemtikGovern:
                 denial_kind="system",
             )
             event_id = await self._audit.write(
-                AuditEntry.from_decision(ctx, did, denial, outcome="error", mode=self._mode)
+                AuditEntry.from_decision(
+                    ctx, did, denial, outcome="error", mode=self._mode
+                )
             )
             # A budget breach already carries its own stable code/guard and the
             # remedy message (D6/D8); attach the audit id and re-raise it unchanged
@@ -530,7 +462,9 @@ class ZemtikGovern:
         killswitch_state)``. Conflict detection does NOT use this — only replay."""
         return (self._mode, self._ks_state())
 
-    def _store_decision(self, key: str, fingerprint: str, did: str, decision: Decision) -> None:
+    def _store_decision(
+        self, key: str, fingerprint: str, did: str, decision: Decision
+    ) -> None:
         """Cache a freshly-evaluated decision under ``key`` and the current stance.
 
         Reuses an existing record (e.g. a slot a proxy reserved for an in-flight
@@ -662,7 +596,9 @@ class ZemtikGovern:
             # outcome is discarded either way — the budget already lost.
             with contextlib.suppress(BaseException):
                 await engine_task
-            raise DecisionBudgetExceeded(self._timeout, elapsed_seconds=self._time_fn() - start)
+            raise DecisionBudgetExceeded(
+                self._timeout, elapsed_seconds=self._time_fn() - start
+            )
         # Engine won the race. Cancel the now-moot timer and return the result.
         timer.cancel()
         with contextlib.suppress(asyncio.CancelledError):
@@ -694,7 +630,9 @@ class ZemtikGovern:
         # fallback alike (#36, T1). The guard presents as a PolicyEngine, so an
         # injection hit is a policy deny folded into this seam (P2).
         if self._injection_classifier is not None:
-            return GuardedEngine(engine, self._injection_classifier, mode=self._injection_mode)
+            return GuardedEngine(
+                engine, self._injection_classifier, mode=self._injection_mode
+            )
         return engine
 
     # NOTE: the decision→audit-vocabulary mapping that used to live here as
@@ -715,225 +653,6 @@ class ZemtikGovern:
         raise GovernanceError(
             "govern_sync() called inside a running event loop; await govern() instead"
         )
-
-    async def _screen_output(self, result: Any, did: str, ctx: GovernanceContext) -> Any:
-        """Screen a tool's return value through the output rails, fail-closed (#39/#40).
-
-        Runs INSIDE proxy()'s effect path so the screened value is what gets cached.
-        With no classifiers wired the seam is inert — the raw value passes through.
-        Otherwise the value is projected to text (the C0 extraction contract) and
-        each rail screens it.
-
-        **Read path (IO_READ, ENFORCE hit):** withhold the value and raise
-        :class:`OutputGovernanceDenied`; the error's ``audit_id`` back-links to the
-        ``output_denied_raised`` row. An allowed output emits ``output_allowed``.
-
-        **Write path (IO_WRITE, ENFORCE hit, #40):** the side effect already
-        happened (the design's output-deny asymmetry). Instead of raising we:
-        1. Write a HIGH-severity ``output_denied_redacted`` audit row.
-        2. Return a :class:`~zemtik_govern.output.RedactedOutput` sentinel
-           (spare str/repr, poison getattr/iter/getitem) so the offending value
-           never reaches the caller but structured logging never crashes either.
-
-        **Rail fault on write:** if ``classifier.screen()`` itself raises on a
-        WRITE tool, the response is the same as an ENFORCE hit — return
-        ``RedactedOutput`` with ``rail="rail_fault"`` and a HIGH-severity row.
-        On a READ tool a classifier fault re-raises (fail closed).
-
-        Shadow (observe-only): when the global mode is ``shadow`` OR a rail's own
-        mode is ``shadow``, that rail's match is OBSERVED — an ``output_would_deny``
-        row is written and the value is returned unblocked. Global shadow makes
-        EVERY rail (and extraction failures) observe-only, mirroring the input-side
-        ``_enforce`` contract so a whole-governor shadow rollout never hard-blocks.
-
-        ``did`` is the identity-resolved subject, threaded from ``govern`` so output
-        rows are attributed to the SAME agent the input row names.
-        """
-        if not self._output_classifiers:
-            return result
-        global_shadow = self._mode == _SHADOW
-        # Warn-once for actions absent from _tool_io_map (Issue #42). An action not
-        # in the map silently defaults to write (fail-closed), which is the right
-        # security posture — but a READ tool the operator forgot to classify becomes
-        # a write tool, and its PII output will be silently redacted (RedactedOutput)
-        # in production rather than being caught and fixed at development time. The
-        # warn fires on the FIRST call for each novel unmapped action so the operator
-        # sees it immediately in dev/staging logs, before it ships. Subsequent calls
-        # for the SAME action are silent (alert fatigue defeats the purpose). A plain
-        # set is safe because asyncio is single-threaded.
-        if ctx.action not in self._tool_io_map and ctx.action not in self._output_warned_actions:
-            self._output_warned_actions.add(ctx.action)
-            _LOG.warning(
-                "output seam: action %r is unmapped in tool_io_map — "
-                "defaulting to write (fail-closed). Add it to tool_io_map "
-                "to suppress this warning and confirm the classification.",
-                ctx.action,
-            )
-        io = resolve_io(self._tool_io_map, ctx.action)
-        try:
-            text = extract_text(result)
-        except OutputExtractionError as exc:
-            # An unscreenable return (custom object, non-UTF-8 bytes, oversized, a
-            # generator/iterator) is a screening failure governed by the GLOBAL mode:
-            # under global shadow it is observed (value returned); otherwise it is a
-            # fail-closed deny. The message names the offending type, never the value.
-            if global_shadow:
-                await self._write_output(ctx, did, event="would_deny", rail="extraction")
-                _LOG.warning("output extraction WOULD deny (shadow): %s", exc)
-                return result
-            event_id = await self._write_output(ctx, did, event="denied_raised", rail="extraction")
-            raise OutputGovernanceDenied(
-                f"tool output could not be screened; blocked. {exc}",
-                rail="extraction",
-                audit_id=event_id,
-            ) from exc
-        observed_would_deny = False
-        for classifier in self._output_classifiers:
-            # --- Rail fault handling: classifier.screen() may itself raise. ----
-            # On a WRITE tool: return RedactedOutput + HIGH audit (same as an
-            # ENFORCE hit) — the side effect already happened and we must never
-            # pass through an unscreened value. On a READ tool: re-raise so the
-            # fail-closed guarantee holds for the read path.
-            try:
-                verdict = await classifier.screen(text, ctx)
-            except Exception as exc:  # noqa: BLE001 — intentional broad catch
-                rail_name = getattr(classifier, "name", "unknown")
-                _LOG.error(
-                    "output rail %r raised during screen(); treating as deny. %s",
-                    rail_name,
-                    exc,
-                )
-                if io == IO_WRITE:
-                    event_id = await self._write_output(
-                        ctx, did, event="denied_redacted", rail="rail_fault", severity="HIGH"
-                    )
-                    from .output import RedactedOutput
-                    return RedactedOutput(audit_id=event_id)
-                # Read tool: re-raise (fail closed).
-                event_id = await self._write_output(
-                    ctx, did, event="denied_raised", rail="rail_fault"
-                )
-                raise OutputGovernanceDenied(
-                    f"output rail {rail_name!r} raised during screening; "
-                    f"blocked fail-closed. {exc}",
-                    rail="rail_fault",
-                    audit_id=event_id,
-                ) from exc
-
-            if not verdict.is_match:
-                continue
-            rail_shadow = global_shadow or getattr(classifier, "mode", _GUARD_ENFORCE) == _SHADOW
-            if rail_shadow:
-                # Observe-only: record the would-deny (no value echo) and keep
-                # scanning — the value is returned unless a later ENFORCE rail fires.
-                await self._write_output(ctx, did, event="would_deny", rail=verdict.rail)
-                _LOG.warning("output rail %r WOULD deny (shadow): %s", verdict.rail, verdict.reason)
-                observed_would_deny = True
-                continue
-            if io == IO_READ:
-                # Read path: withhold the value and raise. No-echo: name the
-                # rail + the tunable knob, never the value (D6).
-                event_id = await self._write_output(
-                    ctx, did, event="denied_raised", rail=verdict.rail
-                )
-                raise OutputGovernanceDenied(
-                    f"output blocked by the {verdict.rail!r} rail "
-                    f"({verdict.reason}); tune it via rails."
-                    f"{verdict.rail}.threshold/mode",
-                    rail=verdict.rail,
-                    audit_id=event_id,
-                )
-            # Write path (#40): the side effect already happened. Return the
-            # redaction sentinel + write a HIGH-severity audit row. The caller
-            # never receives the offending value (no-echo, D6), and structured
-            # logging (str/repr of the sentinel) never crashes.
-            event_id = await self._write_output(
-                ctx, did, event="denied_redacted", rail=verdict.rail, severity="HIGH"
-            )
-            from .output import RedactedOutput
-            return RedactedOutput(audit_id=event_id)
-        # No ENFORCE rail fired. Record ``output_allowed`` only when the output was
-        # genuinely clean; a shadow-observed would-deny already has its own row.
-        if not observed_would_deny:
-            await self._write_output(ctx, did, event="allowed", rail=None)
-        return result
-
-    async def _write_output(
-        self,
-        ctx: GovernanceContext,
-        did: str,
-        *,
-        event: str,
-        rail: str | None,
-        severity: str | None = None,
-    ) -> str:
-        """Write one output-seam audit row and return its id so a raised exception
-        or a returned sentinel correlates to it via ``.audit_id``.
-
-        ``event`` is one of ``allowed`` / ``denied_raised`` / ``would_deny`` /
-        ``denied_redacted`` (the #40 write-tool path). ``severity`` is ``"HIGH"``
-        for the ``denied_redacted`` and rail-fault events so a SIEM consumer can
-        filter on severity without inspecting ``event_type``.
-        """
-        return await self._audit.write(
-            AuditEntry.from_output(
-                ctx, did, event=event, rail=rail, mode=self._mode, severity=severity
-            )
-        )
-
-    def unwrap(self, result: Any) -> Any:
-        """Collapse the read-deny-raises / write-deny-returns asymmetry into one call.
-
-        The output seam has two enforcement shapes:
-
-        * **Read-classified tools** raise :class:`~zemtik_govern.errors.OutputGovernanceDenied`
-          directly from ``proxy()`` when an enforce rail fires — the caller never
-          receives the offending value.
-        * **Write-classified tools** *return* a
-          :class:`~zemtik_govern.output.RedactedOutput` sentinel so the already-
-          executed side effect can be logged/tracked, but the redacted value must
-          never be used downstream.
-
-        ``unwrap()`` bridges that asymmetry: wrap **every** governed result in it
-        and the caller sees a uniform contract — clean value through, denied value
-        raises — without needing to ``isinstance``-check for the sentinel::
-
-            result = await proxy_write()
-            value  = gov.unwrap(result)   # raises if result is RedactedOutput
-
-        **No-echo (D6):** the message names the contract ("output was redacted")
-        and the ``audit_id`` back-link, never the withheld value itself.
-
-        Args:
-            result: The value returned by a governed proxy call.
-
-        Returns:
-            *result* unchanged when it is **not** a
-            :class:`~zemtik_govern.output.RedactedOutput`.
-
-        Raises:
-            :class:`~zemtik_govern.errors.OutputGovernanceDenied`: when *result*
-            is a :class:`~zemtik_govern.output.RedactedOutput` sentinel, carrying
-            the sentinel's ``audit_id`` so the caller can correlate to the audit
-            trail without re-deriving anything.
-        """
-        from .output import RedactedOutput
-
-        if isinstance(result, RedactedOutput):
-            # Use object.__getattribute__ to bypass the sentinel's poison
-            # __getattr__ hook — audit_id is a frozen dataclass field stored in
-            # __dict__, but we play it safe in case the sentinel is partially
-            # constructed (e.g. in tests).
-            try:
-                aid = object.__getattribute__(result, "audit_id")
-            except AttributeError:
-                aid = None
-            raise OutputGovernanceDenied(
-                "output was redacted by an output rail; the value is withheld "
-                f"(audit_id={aid!r}); check the audit trail for details",
-                audit_id=aid,
-            )
-        return result
 
     def proxy(
         self,
@@ -1003,7 +722,9 @@ class _GovernedProxy:
         # of re-invoking the tool. Only successful effects stay cached (failures and
         # denies are cleared), so a retry of a transient fault re-runs.
 
-    def _build_ctx(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> GovernanceContext:
+    def _build_ctx(
+        self, args: tuple[Any, ...], kwargs: dict[str, Any]
+    ) -> GovernanceContext:
         """Build the governance context for a call.
 
         Delegates to *context_factory* when provided; falls back to wrapping
@@ -1017,7 +738,8 @@ class _GovernedProxy:
                 # A factory that returns the wrong shape would be governed under
                 # unknown values — refuse rather than route around the policy key.
                 raise GovernanceError(
-                    f"context_factory must return a GovernanceContext, got {type(ctx).__name__}"
+                    "context_factory must return a GovernanceContext, got "
+                    f"{type(ctx).__name__}"
                 )
             return ctx
         return GovernanceContext(
@@ -1031,12 +753,8 @@ class _GovernedProxy:
         ctx = self._build_ctx(args, kwargs)
         key = ctx.idempotency_key
         if key is None:
-            # Capture the resolved DID (xmodel #1) so the output seam attributes its
-            # events to the same agent the input row names. A2: the non-keyed path
-            # gets output screening but NOT effect-idempotency (documented, mirrors
-            # the existing replay tradeoff).
-            did, _decision = await self._gov._govern_with_did(ctx)  # raises on deny
-            return await self._invoke(args, kwargs, did, ctx)
+            await self._gov.govern(ctx)  # raises on deny -> the tool never runs
+            return await self._invoke(args, kwargs)
 
         # INVARIANT (single-tool-run): there must be NO await between this
         # _effect_get returning None and the _effect_reserve below in the
@@ -1058,7 +776,9 @@ class _GovernedProxy:
         # First call for this key. Create the effect task synchronously so the slot
         # is reserved BEFORE any await — a concurrent duplicate then sees it and
         # waits on the same execution instead of racing into a second tool call.
-        task: asyncio.Future[Any] = asyncio.ensure_future(self._effect(ctx, args, kwargs))
+        task: asyncio.Future[Any] = asyncio.ensure_future(
+            self._effect(ctx, args, kwargs)
+        )
         self._gov._effect_reserve(key, task)
         task.add_done_callback(self._evict_failed_effect(key))
         # ``shield`` so this caller's cancellation can't cancel the shared effect;
@@ -1066,7 +786,9 @@ class _GovernedProxy:
         # owns slot cleanup.
         return await asyncio.shield(task)
 
-    def _evict_failed_effect(self, key: str) -> Callable[[asyncio.Future[Any]], None]:
+    def _evict_failed_effect(
+        self, key: str
+    ) -> Callable[[asyncio.Future[Any]], None]:
         """Done-callback that drops a failed effect from the cache so a later retry
         re-runs. Tied to the TASK's lifetime, not any caller's: if the first caller
         is cancelled while the effect is still running, this still fires when the
@@ -1092,24 +814,12 @@ class _GovernedProxy:
         Only successful results are cached; a denial or tool exception propagates
         and evicts the slot so a retry re-runs both governance and the tool.
         """
-        did, _decision = await self._gov._govern_with_did(ctx)  # raises on deny
-        return await self._invoke(args, kwargs, did, ctx)
+        await self._gov.govern(ctx)  # raises on deny -> the tool never runs
+        return await self._invoke(args, kwargs)
 
-    async def _invoke(
-        self,
-        args: tuple[Any, ...],
-        kwargs: dict[str, Any],
-        did: str,
-        ctx: GovernanceContext,
-    ) -> Any:
-        """Call the wrapped function (awaiting a coroutine return), then screen its
-        output through the governor's rails (#39) before handing it back.
-
-        The screen runs HERE — inside the effect path shared by the keyed and
-        non-keyed callers — so the screened value is the one cached for a keyed
-        replay; the unscreened original never leaks on replay. The resolved ``did``
-        is threaded so output events are attributed to the governed agent."""
+    async def _invoke(self, args: tuple[Any, ...], kwargs: dict[str, Any]) -> Any:
+        """Call the wrapped function, awaiting if it returns a coroutine."""
         result = self._fn(*args, **kwargs)
         if inspect.isawaitable(result):
-            result = await result
-        return await self._gov._screen_output(result, did, ctx)
+            return await result
+        return result
