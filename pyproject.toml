@@ -21,13 +21,6 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Typing :: Typed",
 ]
-
-[project.urls]
-Homepage = "https://github.com/dacarva/zemtik-govern"
-Repository = "https://github.com/dacarva/zemtik-govern"
-"Bug Tracker" = "https://github.com/dacarva/zemtik-govern/issues"
-Changelog = "https://github.com/dacarva/zemtik-govern/blob/main/CHANGELOG.md"
-
 dependencies = [
     # AGT boundary — pinned exactly; assert_pins() enforces these at runtime.
     "agent-os-kernel==3.7.0",
@@ -52,6 +45,12 @@ openai = [
 mcp = [
     "mcp>=1.0.0,<2.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/dacarva/zemtik-govern"
+Repository = "https://github.com/dacarva/zemtik-govern"
+"Bug Tracker" = "https://github.com/dacarva/zemtik-govern/issues"
+Changelog = "https://github.com/dacarva/zemtik-govern/blob/main/CHANGELOG.md"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/zemtik_govern"]
