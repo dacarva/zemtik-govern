@@ -4,12 +4,30 @@ build-backend = "hatchling.build"
 
 [project]
 name = "zemtik-govern"
-version = "0.1.0.dev0"
+version = "0.4.0.0"
 description = "Security-first modular Python wrapper around Microsoft AGT"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 authors = [{ name = "David Carvajal", email = "david@zemtik.com" }]
+keywords = ["governance", "security", "agents", "llm", "langchain", "agt", "policy", "audit"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Security",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/dacarva/zemtik-govern"
+Repository = "https://github.com/dacarva/zemtik-govern"
+"Bug Tracker" = "https://github.com/dacarva/zemtik-govern/issues"
+Changelog = "https://github.com/dacarva/zemtik-govern/blob/main/CHANGELOG.md"
+
 dependencies = [
     # AGT boundary — pinned exactly; assert_pins() enforces these at runtime.
     "agent-os-kernel==3.7.0",

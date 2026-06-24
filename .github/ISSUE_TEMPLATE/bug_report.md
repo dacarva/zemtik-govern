@@ -7,7 +7,7 @@ labels: bug
 ## Environment
 
 - **Python version**: <!-- e.g. 3.11.6 -->
-- **zemtik-govern version**: <!-- e.g. 0.1.0 -->
+- **zemtik-govern version**: <!-- e.g. 0.4.0.0 -->
 - **langchain-core version**: <!-- e.g. 0.3.x -->
 - **langgraph version** (if applicable): <!-- e.g. 0.2.x -->
 
