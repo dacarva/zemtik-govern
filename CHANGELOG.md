@@ -2,7 +2,7 @@
 
 All notable changes to zemtik-govern are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); the project versions
-via `pyproject.toml` (currently `0.1.0.dev0`, pre-release).
+via `pyproject.toml` (currently `0.4.0.0`).
 
 ## [0.4.0.0] - 2026-06-22 — output-governance rail layer (C0)
 

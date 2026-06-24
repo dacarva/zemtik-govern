@@ -190,4 +190,4 @@ ruff check src/
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full dev setup and three-seam contract.
 
-Status: pre-1.0, tracking the 0.3.x release line — see [CHANGELOG.md](CHANGELOG.md). The published package metadata reads `0.1.0.dev0` until the first PyPI cut. License: Apache-2.0.
+Status: v0.4.0.0 — see [CHANGELOG.md](CHANGELOG.md). License: Apache-2.0.
