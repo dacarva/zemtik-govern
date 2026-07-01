@@ -4,13 +4,23 @@
 > documents the **Tracer seam** (Slice 0). Tracing, config, masking, prompts, and
 > evals land in later slices.
 
-`zemtik-govern` can emit governance-pipeline telemetry to
-[Langfuse](https://langfuse.com) — self-hosted or cloud — as an **optional
-extension that is OFF by default**. It is not an LLM application (the wrapper
-governs *other* agents' tool calls and never calls a model), so "tracing" here
-means turning one `govern()` call into a Langfuse **trace** whose seams
-(identity → policy → audit, plus the injection / output guards) are nested
+`zemtik-govern` can emit telemetry to [Langfuse](https://langfuse.com) —
+self-hosted or cloud — as an **optional extension that is OFF by default**.
+
+The **library itself is LLM-agnostic**: it governs *other* agents' tool calls and
+never imports or calls a model. So its own contribution to a trace is the
+**governance pipeline** — one `govern()` call becomes a Langfuse **trace** whose
+seams (identity → policy → audit, plus the injection / output guards) are nested
 **spans/observations**.
+
+But a real deployment (see `sandbox/e2e_openai_governed.py`) *does* run an LLM, and
+the model call is the most valuable thing to trace. So the architecture uses **two
+trace producers under one root** (see "Two trace producers" below): the core `Tracer`
+seam emits governance spans, while the **LLM generation** is captured at the
+agent-loop layer via Langfuse's LangChain callback — both attached to a single
+`agent-run` trace. The core library stays LLM-agnostic; generation tracing lives in
+the integration layer (`zemtik_govern/langchain/`), so any LangChain user gets a full
+`generation → tool-call → identity/policy/audit` tree.
 
 ## Design invariants
 
@@ -23,6 +33,32 @@ means turning one `govern()` call into a Langfuse **trace** whose seams
 - **Isolated behind one boundary.** Only a single module will ever import
   `langfuse`, and only when observability is explicitly enabled. Importing
   `zemtik_govern.observability` pulls in **no** third-party dependency.
+
+## Two trace producers, one root
+
+When an LLM agent is in the loop, a single `agent-run` trace has two contributors:
+
+| Producer | What it emits | Where it lives | Mechanism |
+|----------|---------------|----------------|-----------|
+| Core `Tracer` seam | governance spans (identity → policy → audit, injection/output) | the library (LLM-agnostic) | the `Tracer` Protocol below |
+| LLM generation | model call: prompt, model, tokens, cost | the agent-loop / integration layer | Langfuse's LangChain `CallbackHandler` |
+
+Both attach to the **same root** via OpenTelemetry context propagation: the agent
+loop opens the root trace, the generation lands under it through the callback, and
+each governed tool call — which runs *inside* that loop — nests its governance spans
+under the same root. The result is one tree:
+
+```
+agent-run
+├─ generation (gpt-…, tokens, cost)         ← LangChain callback
+└─ tool-call: transfer_funds
+   ├─ identity
+   ├─ policy   (allowed=false, denial_kind=policy)
+   └─ audit    (audit_event_id=…)            ← core Tracer seam
+```
+
+The core library never imports an LLM SDK; the generation-tracing helper is an opt-in
+part of `zemtik_govern/langchain/`, consumed by `sandbox/e2e_openai_governed.py`.
 
 ## The Tracer seam (Slice 0)
 
