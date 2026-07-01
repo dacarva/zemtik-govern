@@ -55,6 +55,17 @@ class GovernanceRegistry:
         # value). The io map classifies each action read|write for the seam.
         self._output_classifiers: list[Any] = []
         self._tool_io_map: dict[str, str] = {}
+        # Optional observability tracer (fail-open telemetry). None until wired so
+        # build() leaves the core's NoOpTracer default untouched; from_config will
+        # thread a real tracer only when observability is enabled.
+        self._tracer: Any | None = None
+
+    def register_tracer(self, tracer: Any) -> GovernanceRegistry:
+        """The observability :class:`~zemtik_govern.observability.Tracer` carried
+        into ``ZemtikGovern(tracer=)``. Optional: an unset tracer leaves the core's
+        NoOpTracer default (observability off)."""
+        self._tracer = tracer
+        return self
 
     def register_guard_modes(self, injection_mode: str, budget_mode: str) -> GovernanceRegistry:
         """The per-guard stances (``enforce|shadow``) carried into
@@ -150,6 +161,8 @@ class GovernanceRegistry:
         if self._output_classifiers:
             extra["output_classifiers"] = self._output_classifiers
             extra["tool_io_map"] = self._tool_io_map
+        if self._tracer is not None:
+            extra["tracer"] = self._tracer
         return ZemtikGovern(
             identity=self._identity,  # type: ignore[arg-type]
             policy=self._policy,  # type: ignore[arg-type]
