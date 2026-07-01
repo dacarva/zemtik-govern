@@ -1,9 +1,9 @@
 # Observability (optional Langfuse extension)
 
 > **Status:** in progress. This guide is built up slice-by-slice. Today it
-> documents the **Tracer seam** (Slice 0) and the **Langfuse boundary** (Slice 1).
-> Core façade instrumentation, config wiring, masking, prompts, and evals land
-> in later slices.
+> documents the **Tracer seam** (Slice 0), the **Langfuse boundary** (Slice 1),
+> and **core façade instrumentation + masking** (Slice 2). Config wiring,
+> prompts, and evals land in later slices.
 
 `zemtik-govern` can emit telemetry to [Langfuse](https://langfuse.com) —
 self-hosted or cloud — as an **optional extension that is OFF by default**.
@@ -152,5 +152,102 @@ in [Sandbox & Demos](sandbox.md#langfuse_boundary_smokepy--langfuse-boundary-con
 The `[langfuse]` extra is not yet wired into `GovernanceConfig` or
 `GovernanceRegistry` — that lands in Slice 3, alongside the startup contract
 for missing/invalid credentials (degrade to `NoOpTracer` + a one-time
-warning, never block boot). Core façade instrumentation (the actual
-identity/policy/audit/output spans) lands in Slice 2.
+warning, never block boot).
+
+## Core façade instrumentation (Slice 2)
+
+`ZemtikGovern` now emits masked spans through whatever `Tracer` it holds — a
+`NoOpTracer` by default (no behavior change at all), a `LangfuseTracer` when
+observability is wired. One `govern()` call produces this tree:
+
+```
+govern                              ← root, opened by govern()/proxy()
+├─ identity
+└─ policy   (allowed=…, denial_kind=…, rule=…, audit_event_id=…)
+```
+
+A `proxy()` call additionally screens the tool's return value, nested as a
+sibling under the SAME root:
+
+```
+govern
+├─ identity
+├─ policy
+└─ output   (event=…, rail=…)
+```
+
+### Where spans come from
+
+- **The root (`"govern"`) is opened by the caller** — `govern()` for a direct
+  call, `_GovernedProxy` for a `proxy()` call — not by the internal pipeline
+  method itself. This is why a `proxy()` call's `output` span lands as a
+  sibling of `identity`/`policy` under one root: the root has to stay open
+  across both the governance decision *and* the later output screen, which
+  happen in two separate calls.
+- **`identity` and `policy`** are two separate sibling spans opened inside the
+  identity→policy sequence, each a direct child of whatever's currently open.
+  Span open/close sits **outside** the decision-budget race (`_with_budget`) —
+  a slow tracer can never trip `DecisionBudgetExceeded`.
+- **`output`** only appears for `proxy()` calls (bare `govern()`/`govern_sync()`
+  never screen output) and is annotated at the single chokepoint every output
+  branch (allow / read-deny / write-redact / rail-fault / shadow would-deny)
+  already funnels through.
+- **Replay** (`idempotency_key`, cached decision): exactly ONE root span,
+  annotated `replayed=true`, with **no** `identity`/`policy` children — that
+  code path never re-runs governance, so no child span is ever opened.
+- **A fingerprint failure or an idempotency-key conflict** still gets a root
+  span (annotated `event="idempotency_fingerprint_error"` /
+  `event="idempotency_conflict"`) even though neither path reaches the
+  identity/policy sequence — security-relevant outcomes are traced even when
+  they short-circuit before evaluation.
+
+### Fail-open, defense-in-depth
+
+Two independent layers, so governance is safe regardless of which `Tracer` is
+installed — even a maximally hostile one:
+
+1. **The core guard** (`core.py::_traced`/`_span_set`) — the ONLY place
+   `core.py` ever calls a tracer/span method. Every open (`.trace()`/`.span()`/
+   `__enter__`), attribute assembly, and close (`__exit__`) is individually
+   wrapped so no exception from any of them — nor from the masking function
+   itself — ever reaches `govern()`. The governed body's own exceptions
+   (`GovernanceDenied`, `DecisionBudgetExceeded`, an identity/policy fault)
+   propagate through completely unmodified; the guard only *observes* them to
+   tell a healthy span how the block ended.
+2. **The façade guard** (`LangfuseTracer`'s own `_safe` wrapping) — a second,
+   independent layer so a real SDK error is cheap and contained even before it
+   would reach layer 1.
+
+`tests/observability/test_core_tracing_failopen.py` proves this against
+injected hostile fakes (exploding `.trace()`/`__enter__`/`__exit__`/masking, a
+slow tracer racing the decision budget) — decisions, raised exceptions,
+`audit_id`, and mode are byte-identical to the `NoOpTracer` baseline in every
+case, entirely without the `[langfuse]` extra installed.
+
+### Masking (`observability/masking.py`)
+
+The first span ever emitted is already masked — never a later layer. Every
+attribute comes from one of three pure functions, and none of them ever see
+`ctx.payload` or a tool's raw output:
+
+- `safe_trace_attrs_root(ctx, *, mode)` → `action`, `mode`.
+- `safe_trace_attrs_decision(decision, *, emit_rule_names=True)` → `action`,
+  `allowed`, `denial_kind`, the matched rule's *name* (or an opaque id),
+  `audit_event_id`, plus an injection annotation (below).
+- `safe_trace_attrs_output(*, event, rail, severity=None)` → the output rail's
+  *name* and outcome, never the screened value.
+
+**Injection annotation, no new hook.** The prompt-injection guard is folded
+into the policy engine (`GuardedEngine`, in `injection.py`) rather than being
+a separate seam `core.py` can instrument directly. An enforce-mode hit already
+produces an already-safe, fixed-shape deny reason (field *name* + AGT's
+type/threat labels, never payload); `safe_trace_attrs_decision` regex-parses
+that exact shape into `injection` / `injection.type` / `injection.threat` /
+`injection.field` attributes on the `policy` span. **Caveat:** `GuardedEngine`'s
+**shadow-mode** would-deny does not produce this Decision shape at all (it
+logs and delegates to the inner engine) — a shadow-mode injection hit has no
+span annotation today, only the existing log line.
+
+See `tests/observability/test_core_tracing.py` for the masking / no-echo /
+injection-annotation assertions, and `tests/observability/_fakes.py` for the
+recording and hostile fake tracers the test suite drives.
