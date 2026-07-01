@@ -74,7 +74,13 @@ class LangfuseBoundary:
                 f"pip install 'zemtik-govern[{LANGFUSE_EXTRA}]'"
             ) from exc
 
-        major = int(installed.split(".")[0])
+        try:
+            major = int(installed.split(".")[0])
+        except ValueError as exc:
+            raise LangfuseVersionError(
+                f"langfuse reports an unparseable version {installed!r}; "
+                f"zemtik-govern requires major version {SUPPORTED_MAJOR}.x"
+            ) from exc
         if major != SUPPORTED_MAJOR:
             raise LangfuseVersionError(
                 f"langfuse {installed} is installed but zemtik-govern requires "

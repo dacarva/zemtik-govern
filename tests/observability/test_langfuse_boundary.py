@@ -9,7 +9,9 @@ version lookup rather than needing the package uninstalled).
 
 from __future__ import annotations
 
+import ast
 import importlib.metadata as metadata
+from pathlib import Path
 
 import pytest
 
@@ -19,6 +21,8 @@ from zemtik_govern.observability._langfuse import (
     LangfuseVersionError,
     _installed_version,
 )
+
+_SRC = Path(__file__).parent.parent.parent / "src" / "zemtik_govern"
 
 
 def test_build_tracer_names_the_extra_when_sdk_is_absent(monkeypatch):
@@ -82,3 +86,22 @@ def test_boundary_mask_hook_scrubs_a_known_raw_value():
     masked = boundary.client._mask(data="raw-ssn-123-45-6789")
     assert masked == "REDACTED"
     assert "123-45-6789" not in str(masked)
+
+
+def test_no_direct_langfuse_imports_outside_the_boundary():
+    """Boundary rule (mirrors tests/test_agt_boundary.py's AGT scan): only
+    ``_langfuse.py`` may import ``langfuse`` anywhere in ``src/``."""
+    violations: list[tuple[Path, str]] = []
+    for py_file in _SRC.rglob("*.py"):
+        if py_file.name == "_langfuse.py":
+            continue
+        tree = ast.parse(py_file.read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name.split(".")[0] == "langfuse":
+                        violations.append((py_file, alias.name))
+            elif isinstance(node, ast.ImportFrom):
+                if node.module and node.module.split(".")[0] == "langfuse":
+                    violations.append((py_file, node.module))
+    assert not violations, f"Direct langfuse imports found outside _langfuse.py: {violations}"
