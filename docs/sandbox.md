@@ -18,6 +18,7 @@ uv pip install -e ".[dev]"
 | `auditor.py` | Durable audit trail: verify Merkle/HMAC, extract inclusion proofs, detect tampering | none |
 | `dogfood_cutover.py` | Staged cutover of a fintech agent: shadow → enforce, kill-switch revert, audit integrity | none |
 | `e2e_openai_governed.py` | A real `gpt-5.4-nano` agent governed through `GovernedToolNode` against a mock bank DB, plus deterministic probes for every hardening module (injection battery, decision budget, per-guard shadow, idempotency, error codes, **output seam**) | `[langchain]`, `[openai]`, OpenAI key |
+| `langfuse_boundary_smoke.py` | `LangfuseBoundary` (Slice 1) talks to a real Langfuse backend: auth check, a flushed manual trace, and the `mask` hook running on a real emitted span. NOT a governance demo — no seam is traced yet. | `[langfuse]`, a Langfuse project's keys |
 
 ## qa_demo.py — three-seam scenarios
 
@@ -130,6 +131,43 @@ ignored, `!.env.example` is the one exception). Never paste a key into a
 committed file. `ZEMTIK_AUDIT_SECRET` is the HMAC signing key for the audit
 trail; it defaults to a local demo value if unset. The `AuditReader` must use
 the same secret to verify.
+
+## langfuse_boundary_smoke.py — Langfuse boundary connectivity check
+
+Proves `LangfuseBoundary` (see [`docs/observability.md`](observability.md) and
+[ADR 002](adr/002-langfuse-pin.md)) actually talks to a live Langfuse backend —
+self-hosted or cloud — not just the local SDK unit tests. **This is not a
+governance demo**: as of Slice 1, nothing in `ZemtikGovern.govern()` calls the
+tracer yet (core instrumentation is Slice 2, config/registry wiring is Slice 3),
+so there is no governed call to trace. Instead the script opens a manual trace
+directly against `boundary.client` and checks:
+
+1. the credentials are valid (`auth_check()` against the real API);
+2. a trace actually reaches the backend (flushed, not just batched locally);
+3. the registered `mask` hook is invoked on a real, backend-delivered span —
+   the emitted trace's root `input` should read `<masked-by-smoke-test>`, never
+   the raw value the script fed it.
+
+```bash
+# 1. Install the optional Langfuse extra.
+uv pip install -e ".[dev,langfuse]"
+
+# 2. Provide real project keys (self-hosted default: http://localhost:3000).
+cp .env.example .env
+#   then edit .env: set LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST
+
+# 3. Run it.
+python sandbox/langfuse_boundary_smoke.py
+```
+
+Exit code `2` means the extra isn't installed or keys are missing (a setup
+error); `1` means the backend rejected the credentials or wasn't reachable;
+`0` means the trace was created, flushed, and its URL printed — check that URL
+in the Langfuse UI to see the masked value.
+
+Once Slice 2/2b land, `e2e_openai_governed.py` gets an opt-in Langfuse mode
+that traces the real governed agent run end to end (Slice 8) — this script is
+the narrower, Slice-1-scoped predecessor.
 
 ## S16 — Output-seam PII redaction (qa_demo.py)
 

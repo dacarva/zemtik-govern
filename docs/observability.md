@@ -144,6 +144,11 @@ Install the extra to use it:
 pip install 'zemtik-govern[langfuse]'
 ```
 
+To check the boundary against a real self-hosted or cloud backend (auth,
+a flushed trace, and the mask hook actually running), see
+[`sandbox/langfuse_boundary_smoke.py`](../sandbox/langfuse_boundary_smoke.py)
+in [Sandbox & Demos](sandbox.md#langfuse_boundary_smokepy--langfuse-boundary-connectivity-check).
+
 The `[langfuse]` extra is not yet wired into `GovernanceConfig` or
 `GovernanceRegistry` — that lands in Slice 3, alongside the startup contract
 for missing/invalid credentials (degrade to `NoOpTracer` + a one-time
