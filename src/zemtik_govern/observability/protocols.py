@@ -31,7 +31,14 @@ class Span(Protocol):
         ...
 
     def span(self, name: str) -> AbstractContextManager[Span]:
-        """Open a nested child span as a context manager."""
+        """Open a nested child span as a context manager.
+
+        Callers MUST use ``with span.span(name) as child: ...`` — the return is a
+        context manager to be entered, never an already-live span. (``NoOpTracer``
+        happens to return an entered singleton, so the two are interchangeable
+        today, but a real ``LangfuseTracer`` returns a fresh, non-entered CM; the
+        core-level ``_traced`` guard relies on the ``with`` contract.)
+        """
         ...
 
     def __enter__(self) -> Span: ...

@@ -328,8 +328,11 @@ class ZemtikGovern:
     @property
     def tracer(self) -> Tracer:
         """The observability tracer this governor drives (a ``NoOpTracer`` unless
-        one was wired). Read-only: the tracer is fixed at construction, like the
-        seams."""
+        one was wired). Read-only: the tracer is fixed at construction.
+
+        Deliberately public (unlike the identity/policy/audit seams, which stay
+        private): observability is an opt-in extension a caller may reasonably want
+        to introspect or assert on, and it holds no security authority."""
         return self._tracer
 
     def _log_active_guards(self, idem_max_entries: int, idem_ttl_seconds: float | None) -> None:

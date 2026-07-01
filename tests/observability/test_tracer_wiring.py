@@ -103,3 +103,17 @@ def test_registry_register_tracer_threads_it_into_the_core() -> None:
         .build()
     )
     assert gov.tracer is t
+
+
+def test_registry_without_register_tracer_defaults_to_noop() -> None:
+    # A registry built without register_tracer leaves the core's NoOpTracer default —
+    # observability off, and the `if self._tracer is not None` build branch is exercised.
+    seam = _Seams(decision=_ALLOW)
+    gov = (
+        GovernanceRegistry()
+        .register_identity(seam)
+        .register_policy(seam)
+        .register_audit(seam)
+        .build()
+    )
+    assert isinstance(gov.tracer, NoOpTracer)
