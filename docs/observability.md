@@ -1,8 +1,9 @@
 # Observability (optional Langfuse extension)
 
 > **Status:** in progress. This guide is built up slice-by-slice. Today it
-> documents the **Tracer seam** (Slice 0). Tracing, config, masking, prompts, and
-> evals land in later slices.
+> documents the **Tracer seam** (Slice 0) and the **Langfuse boundary** (Slice 1).
+> Core façade instrumentation, config wiring, masking, prompts, and evals land
+> in later slices.
 
 `zemtik-govern` can emit telemetry to [Langfuse](https://langfuse.com) —
 self-hosted or cloud — as an **optional extension that is OFF by default**.
@@ -104,3 +105,47 @@ gov.tracer  # read-only accessor for the wired tracer
 
 See `tests/observability/` for the seam contract and the zero-behavior-change
 guarantees.
+
+## The Langfuse boundary (Slice 1)
+
+Mirroring `_agt.py`, exactly one module — `observability/_langfuse.py` — is
+allowed to import `langfuse`. `LangfuseBoundary` is the one object that owns
+the SDK:
+
+```python
+from zemtik_govern.observability._langfuse import LangfuseBoundary
+
+boundary = LangfuseBoundary(
+    public_key="pk-...",
+    secret_key="sk-...",
+    host="https://cloud.langfuse.com",  # or your self-hosted URL
+)
+boundary.client  # the underlying langfuse.Langfuse instance
+```
+
+- **Major-version gate, not exact-pin.** The `[langfuse]` extra is range-pinned
+  (`langfuse>=4.12,<5`) like every other optional extra in this repo; the
+  boundary asserts `major == 4` at construction and raises
+  `LangfuseVersionError` on drift. See
+  [ADR 002](adr/002-langfuse-pin.md) for why this differs from the AGT
+  boundary's exact pin.
+- **Missing SDK is a boot error.** If observability is enabled but `langfuse`
+  isn't installed, construction raises `GovernanceNotConfigured` naming the
+  `[langfuse]` extra — a packaging mistake, caught at startup.
+- **Isolated `TracerProvider`.** The boundary builds its own
+  `TracerProvider` and passes it to the `Langfuse` client explicitly, so
+  enabling telemetry never mutates process-global OpenTelemetry state.
+- **A masking hook is always registered** (identity by default). Slice 2 wires
+  the real no-echo masking discipline through it.
+
+Install the extra to use it:
+
+```bash
+pip install 'zemtik-govern[langfuse]'
+```
+
+The `[langfuse]` extra is not yet wired into `GovernanceConfig` or
+`GovernanceRegistry` — that lands in Slice 3, alongside the startup contract
+for missing/invalid credentials (degrade to `NoOpTracer` + a one-time
+warning, never block boot). Core façade instrumentation (the actual
+identity/policy/audit/output spans) lands in Slice 2.

@@ -2,8 +2,9 @@
 
 Public surface for the observability seam. Importing this package pulls in NO
 third-party dependency: the default :class:`NoOpTracer` and the Protocols are
-pure-stdlib. Only ``build_tracer`` (added in a later slice) ever reaches the
-Langfuse boundary, and only when observability is explicitly enabled.
+pure-stdlib. Only ``zemtik_govern.observability._langfuse`` ever imports
+``langfuse``, and only when a ``LangfuseBoundary`` is actually constructed
+(config/registry wiring that reaches it lands in a later slice).
 """
 
 from __future__ import annotations
