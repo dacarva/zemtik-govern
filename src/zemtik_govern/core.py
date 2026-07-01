@@ -30,6 +30,7 @@ from .errors import (
     OutputGovernanceDenied,
 )
 from .injection import GuardedEngine, InjectionClassifier
+from .observability import NoOpTracer, Tracer
 from .output import (
     IO_READ,
     IO_WRITE,
@@ -219,6 +220,7 @@ class ZemtikGovern:
         budget_mode: str = _GUARD_ENFORCE,
         output_classifiers: list[OutputClassifier] | None = None,
         tool_io_map: Mapping[str, str] | None = None,
+        tracer: Tracer | None = None,
     ) -> None:
         """
         Args:
@@ -279,6 +281,13 @@ class ZemtikGovern:
         # and stays silent thereafter. asyncio is single-threaded so a plain set is
         # safe without a lock.
         self._output_warned_actions: set[str] = set()
+        # Optional observability seam (fail-OPEN telemetry, the inverse of the
+        # fail-CLOSED governance seams). Defaults to a NoOpTracer so a governor
+        # built without observability behaves byte-for-byte as before. Later slices
+        # add a core-level guard around every tracer call so no tracer — not even a
+        # hostile one — can break govern(); the tracer object itself is never
+        # imported from Langfuse here (that lives behind the observability boundary).
+        self._tracer: Tracer = tracer if tracer is not None else NoOpTracer()
         # The injected clock, reused by the budget guard to measure elapsed time
         # for a breach (and for a shadow-mode would-breach observation).
         self._time_fn = time_fn
@@ -315,6 +324,13 @@ class ZemtikGovern:
             is_evictable=lambda record: record.is_evictable(),
         )
         self._log_active_guards(idem_max_entries, idem_ttl_seconds)
+
+    @property
+    def tracer(self) -> Tracer:
+        """The observability tracer this governor drives (a ``NoOpTracer`` unless
+        one was wired). Read-only: the tracer is fixed at construction, like the
+        seams."""
+        return self._tracer
 
     def _log_active_guards(self, idem_max_entries: int, idem_ttl_seconds: float | None) -> None:
         """Announce the active guards once, at construction (D4/D7). Names whether

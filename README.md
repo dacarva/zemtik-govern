@@ -151,6 +151,7 @@ Beyond the input pipeline, an optional post-invocation **output seam** screens a
 - [Operations Guide](docs/operations.md) — deployment checklist, durable audit, kill-switch, shadow rollout, monitoring
 - [API Reference](docs/api-reference.md) — full public API (classes, protocols, exceptions)
 - [Sandbox & Demos](docs/sandbox.md) — runnable demos: three-seam scenarios, the injection battery, audit forensics, staged shadow → enforce cutover, a real `gpt-5.4-nano` agent governed end to end
+- [Observability](docs/observability.md) — optional Langfuse tracing/evals extension (OFF by default; fail-open telemetry, self-hosted first)
 
 ## Sandbox & Demos
 
