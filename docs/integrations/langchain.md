@@ -122,6 +122,18 @@ result = governed_tool.invoke({"msg": "hello"}, config)
 
 Without a `RunnableConfig` (or with one that has no callbacks), no callbacks are emitted and no error is raised.
 
+## Langfuse LLM Generation Tracing
+
+`zemtik_govern.langchain.langfuse_callback(boundary)` wires Langfuse's native
+LangChain `CallbackHandler` so the model call is captured under the same trace
+as `ZemtikGovern`'s own governance spans, when a `LangfuseTracer` (over the
+same `LangfuseBoundary`) is wired into the governor. Requires the `langfuse`
+extra plus the full `langchain` package (`pip install 'zemtik-govern[langchain,langfuse]'`).
+See [`docs/observability.md`](../observability.md#tracing-an-llm-agent-langchain--slice-2b)
+for the full example and trace-tree shape. A broken/misconfigured boundary
+degrades to an inert no-op callback — it never affects a governed tool call's
+decision or result.
+
 ## ZEMTIK_DEV Mode
 
 Set `ZEMTIK_DEV=1` to enable detailed governance logs:

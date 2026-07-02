@@ -30,22 +30,51 @@ jobs:
 
       # Hash-pinned install: requirements-all.lock carries --hash for every dep
       # CI needs — runtime, test tooling (pytest, pytest-asyncio, ruff), AND the
-      # langchain/mcp/openai integration extras — so a tampered or substituted
-      # artifact fails verification at install time. The integration surface the
-      # project markets is now as supply-chain-verified as the core.
+      # langchain/mcp/openai/langfuse integration extras — so a tampered or
+      # substituted artifact fails verification at install time. The integration
+      # surface the project markets is now as supply-chain-verified as the core.
       - name: Install pinned dependencies (runtime + dev + extras)
         run: uv pip install --require-hashes -r requirements-all.lock
 
       - name: Install the package (no deps — already pinned above)
-        run: uv pip install --no-deps -e ".[dev,langchain,mcp,openai]"
+        run: uv pip install --no-deps -e ".[dev,langchain,mcp,openai,langfuse]"
 
       # Run the venv binaries directly (not `uv run`, which would re-sync and
       # could pull unpinned tooling). The env was populated by the hashed install.
       - name: Lint
         run: .venv/bin/ruff check .  # gates the build; config in pyproject [tool.ruff]
 
-      - name: Test (unit + AGT conformance + e2e)
+      - name: Test (unit + AGT conformance + e2e, all extras incl. langfuse)
         run: .venv/bin/pytest -q
+
+  test-observability-langfuse-free:
+    runs-on: ubuntu-latest
+    # The observability seam's core safety property — governance is
+    # byte-identical whether or not the [langfuse] extra is even installed —
+    # can only be proven in an environment that never pulled in `langfuse`.
+    # requirements-dev.lock is core + dev tooling only (no langchain/mcp/openai/
+    # langfuse), so this job is the langfuse-free (and integration-extra-free)
+    # counterpart to the `test` job above.
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Create venv
+        run: uv venv
+
+      - name: Install pinned dependencies (core + dev only, no langfuse)
+        run: uv pip install --require-hashes -r requirements-dev.lock
+
+      - name: Install the package (no deps — already pinned above)
+        run: uv pip install --no-deps -e ".[dev]"
+
+      - name: Test (NoOp tracer + fail-open observability contract)
+        run: .venv/bin/pytest -q tests/observability
 
   supply-chain:
     runs-on: ubuntu-latest
@@ -65,11 +94,36 @@ jobs:
       # OSV / pip-audit gate: scan the resolved lockfiles for known
       # vulnerabilities. Non-zero exit fails the build (no `|| true`). The audit
       # tool itself is version-pinned so the supply-chain gate is reproducible.
-      # Both the runtime lock AND the full lock (incl. langchain/mcp/openai
-      # extras) are scanned — a CVE in an integration dep fails the build too.
+      # Both the runtime lock AND the dev lock (core + dev tooling, no
+      # integration extras) are scanned — a CVE in either fails the release gate.
       - name: Audit runtime dependencies (pip-audit)
         run: |
           uvx "$PIP_AUDIT" --require-hashes --requirement requirements.lock --strict
+
+      - name: Audit dev dependencies (pip-audit)
+        run: |
+          uvx "$PIP_AUDIT" --require-hashes --requirement requirements-dev.lock --strict
+
+  supply-chain-extras:
+    runs-on: ubuntu-latest
+    # Release-blocking, same as the pre-langfuse invariant: requirements-all.lock
+    # carries the langchain/mcp/openai/langfuse integration extras, and a CVE in
+    # ANY of them — not just langfuse — fails the build. langfuse v4 pulling in
+    # the OpenTelemetry/gRPC/protobuf stack is a real, fast-moving CVE surface,
+    # but that is a reason to review findings promptly, not to blanket-exempt
+    # langchain/mcp/openai from the gate they already had before this extra
+    # existed. A genuinely non-blocking langfuse-only carve-out would need its
+    # own lockfile, not continue-on-error over the whole extras set.
+    env:
+      PIP_AUDIT: pip-audit@2.10.1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        run: uv python install 3.11
 
       - name: Audit full dependency set incl. extras (pip-audit)
         run: |

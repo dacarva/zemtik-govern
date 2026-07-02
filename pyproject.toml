@@ -38,12 +38,19 @@ dev = [
 langchain = [
     "langchain-core>=1.4.0,<2.0.0",
     "langgraph>=1.0.0,<2.0.0",
+    # Full `langchain` (not just langchain-core) is required by
+    # langfuse.langchain.CallbackHandler, which unconditionally does
+    # `import langchain` regardless of the installed major version.
+    "langchain>=1.0.0,<2.0.0",
 ]
 openai = [
     "langchain-openai>=0.3.0,<2.0.0",
 ]
 mcp = [
     "mcp>=1.0.0,<2.0.0",
+]
+langfuse = [
+    "langfuse>=4.12,<5",
 ]
 
 [project.urls]
