@@ -106,13 +106,14 @@ jobs:
 
   supply-chain-extras:
     runs-on: ubuntu-latest
-    # NON-release-blocking: requirements-all.lock carries the langchain/mcp/
-    # openai/langfuse integration extras, and langfuse v4 in particular pulls
-    # in the OpenTelemetry + gRPC/protobuf stack — a fast-moving ecosystem
-    # whose CVE cadence must not gate the core release train. A finding here
-    # is a signal to review, not a build failure (see the observability plan's
-    # "supply-chain honesty" invariant).
-    continue-on-error: true
+    # Release-blocking, same as the pre-langfuse invariant: requirements-all.lock
+    # carries the langchain/mcp/openai/langfuse integration extras, and a CVE in
+    # ANY of them — not just langfuse — fails the build. langfuse v4 pulling in
+    # the OpenTelemetry/gRPC/protobuf stack is a real, fast-moving CVE surface,
+    # but that is a reason to review findings promptly, not to blanket-exempt
+    # langchain/mcp/openai from the gate they already had before this extra
+    # existed. A genuinely non-blocking langfuse-only carve-out would need its
+    # own lockfile, not continue-on-error over the whole extras set.
     env:
       PIP_AUDIT: pip-audit@2.10.1
     steps:
@@ -124,6 +125,6 @@ jobs:
       - name: Set up Python
         run: uv python install 3.11
 
-      - name: Audit full dependency set incl. extras (pip-audit, advisory only)
+      - name: Audit full dependency set incl. extras (pip-audit)
         run: |
           uvx "$PIP_AUDIT" --require-hashes --requirement requirements-all.lock --strict

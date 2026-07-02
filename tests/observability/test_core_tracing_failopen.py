@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import pytest
 
+from zemtik_govern import core as core_module
 from zemtik_govern.context import GovernanceContext
 from zemtik_govern.core import ZemtikGovern
 from zemtik_govern.errors import GovernanceError
 from zemtik_govern.identity import AgentRef
 from zemtik_govern.observability import NoOpTracer
-from zemtik_govern.observability import masking as masking_module
 from zemtik_govern.protocols import Decision
 
 from ._fakes import (
@@ -26,6 +26,7 @@ from ._fakes import (
     ExplodingExitTracer,
     ExplodingTracer,
     RecordingTracer,
+    RootOnceExplodingTracer,
     SlowTracer,
 )
 
@@ -105,7 +106,12 @@ async def test_fail_open_exploding_masking_matches_noop_baseline(monkeypatch):
     def _boom(*_a, **_kw):
         raise RuntimeError("boom: masking")
 
-    monkeypatch.setattr(masking_module, "safe_trace_attrs_decision", _boom)
+    # core.py imports safe_trace_attrs_decision via a direct `from ... import`,
+    # binding the function into core's own module namespace — patching the
+    # attribute on the `masking` module would miss that binding and leave
+    # core.py calling the real, non-raising function. Patch core's own
+    # reference so this test actually exercises the _span_set guard.
+    monkeypatch.setattr(core_module, "safe_trace_attrs_decision", _boom)
     tracer = RecordingTracer()
     seams2 = _Seams(decision=_ALLOW)
     exploding_masking_gov = ZemtikGovern(
@@ -113,6 +119,41 @@ async def test_fail_open_exploding_masking_matches_noop_baseline(monkeypatch):
     )
     exploded = await _outcome(exploding_masking_gov)
     assert baseline == exploded
+
+
+@pytest.mark.asyncio
+async def test_span_whose_parent_failed_to_open_stays_untraced_not_a_new_root():
+    """A nested _traced() call must distinguish 'no parent at all' (safe to open
+    a fresh root) from 'the parent span failed to open' (must stay untraced,
+    not open a disconnected new root). Only the root's single failed .trace()
+    call should ever happen — the nested "identity" span must never re-invoke
+    .trace() once its parent has already failed."""
+    tracer = RootOnceExplodingTracer()
+    seams = _Seams(decision=_ALLOW)
+    gov = ZemtikGovern(identity=seams, policy=seams, audit=seams, tracer=tracer)
+    decision = await gov.govern(_ctx())
+    assert decision.allowed is True
+    assert tracer.calls == ["govern"]
+
+
+def test_govern_sync_does_not_mark_spans_errored_from_its_own_loop_check():
+    """Regression: govern_sync() detects "no running loop" via its own
+    ``try: asyncio.get_running_loop() except RuntimeError: return
+    asyncio.run(...)`` — for the entire dynamic extent of that asyncio.run()
+    call, sys.exc_info() still reflects that ALREADY-HANDLED RuntimeError
+    (Python's exception-context tracking is stack-wide, not block-local).
+    _traced() must not hand that stale, unrelated exception to a span's
+    __exit__ just because governance happened to run via govern_sync() rather
+    than `await govern()` — every span opened during a successful sync call
+    must close clean, not be mislabeled as failed."""
+    tracer = RecordingTracer()
+    seams = _Seams(decision=_ALLOW)
+    gov = ZemtikGovern(identity=seams, policy=seams, audit=seams, tracer=tracer)
+    decision = gov.govern_sync(_ctx())
+    assert decision.allowed is True
+    root = tracer.roots[-1]
+    assert root.exit_exc_type is None
+    assert all(child.exit_exc_type is None for child in root.children)
 
 
 @pytest.mark.asyncio

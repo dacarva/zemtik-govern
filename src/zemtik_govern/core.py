@@ -21,7 +21,7 @@ import sys
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, NoReturn
 
 from ._cache import BoundedTTLDict
 from .context import GovernanceContext
@@ -32,7 +32,7 @@ from .errors import (
     OutputGovernanceDenied,
 )
 from .injection import GuardedEngine, InjectionClassifier
-from .observability import NoOpTracer, Span, Tracer
+from .observability import NoOpTracer, Tracer
 from .observability.masking import (
     safe_trace_attrs_decision,
     safe_trace_attrs_output,
@@ -79,9 +79,21 @@ _UNIDENTIFIED_DID = "did:mesh:unidentified"
 # coroutine's body (see _with_budget): the span never straddles the forked
 # Context an asyncio.ensure_future task gets, only ordinary same-task awaits,
 # which share one Context and need no special handling.
-_CURRENT_SPAN: contextvars.ContextVar[Span | None] = contextvars.ContextVar(
+#
+# Holds one of three states: ``None`` (no span active — a genuine root, safe to
+# open a fresh one), a real ``Span`` (an active parent to nest under), or the
+# ``_SPAN_OPEN_FAILED`` sentinel below (an ENCLOSING span failed to open). The
+# third state matters: without it, a nested _traced() call reads the failed
+# parent's ``None`` and can't tell "no parent" from "parent failed" — so it
+# would open a brand-new DISCONNECTED root instead of staying untraced.
+_CURRENT_SPAN: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "zemtik_govern_current_span", default=None
 )
+
+# Sentinel distinguishing "an enclosing span failed to open" from "no parent
+# span at all" (see _CURRENT_SPAN above). A nested _traced() call that sees
+# this sentinel stays untraced rather than opening a disconnected new root.
+_SPAN_OPEN_FAILED = object()
 
 # Recorded when an idempotency key is reused for a different request. A system
 # denial: the request was never evaluated, it was rejected as a key conflict.
@@ -364,14 +376,37 @@ class ZemtikGovern:
         `__exit__` ever escapes into the governed path — while the governed
         body's own exceptions (identity/policy/audit failures, `GovernanceDenied`,
         `DecisionBudgetExceeded`, ...) propagate through the bare ``yield``
-        completely unmodified. `_traced` never has an `except` around `yield`
-        itself, so it is structurally impossible for it to swallow a governed
-        exception; it only *observes* how the block ended (via
-        ``sys.exc_info()``) so a healthy span can record it.
+        completely unmodified. `_traced` catches ``BaseException`` around
+        ``yield`` for the SOLE purpose of capturing it and immediately
+        re-raising unchanged — it is structurally impossible for this to
+        swallow a governed exception; it only *observes* how the block ended
+        so a healthy span can record it.
+
+        Deliberately does NOT call ``sys.exc_info()`` directly in a
+        ``finally`` — that reflects whatever exception is *currently being
+        handled anywhere up the call stack*, not necessarily one raised by
+        this block. A caller invoking ``govern_sync()`` — which itself runs
+        inside ``except RuntimeError:`` (see ``govern_sync``'s own
+        loop-detection check) — left ``sys.exc_info()`` non-empty for the
+        entire nested call into ``self.govern(ctx)``, so every span opened
+        during a synchronous call used to be handed that stale, unrelated
+        exception on exit and marked as errored even though nothing failed.
+        Capturing the exception explicitly in an ``except`` clause (only
+        entered when this block itself raises) avoids inheriting that
+        ambient state.
         """
         parent = _CURRENT_SPAN.get()
         cm: Any = None
-        entered: Span | None = None
+        entered: Any = _SPAN_OPEN_FAILED
+        if parent is _SPAN_OPEN_FAILED:
+            # An enclosing span already failed to open — stay untraced rather
+            # than opening a disconnected new root (see _CURRENT_SPAN above).
+            token = _CURRENT_SPAN.set(_SPAN_OPEN_FAILED)
+            try:
+                yield
+            finally:
+                _CURRENT_SPAN.reset(token)
+            return
         try:
             cm = parent.span(name) if parent is not None else self._tracer.trace(name)
             entered = cm.__enter__()
@@ -379,13 +414,17 @@ class ZemtikGovern:
             _LOG.debug("tracer failed to open span %r; continuing untraced", name, exc_info=True)
             cm = None
         token = _CURRENT_SPAN.set(entered)
+        exc_info: tuple[Any, Any, Any] = (None, None, None)
         try:
             yield
+        except BaseException:
+            exc_info = sys.exc_info()
+            raise
         finally:
             _CURRENT_SPAN.reset(token)
             if cm is not None:
                 try:
-                    cm.__exit__(*sys.exc_info())
+                    cm.__exit__(*exc_info)
                 except Exception:
                     _LOG.debug("tracer failed to close span %r; ignoring", name, exc_info=True)
 
@@ -395,7 +434,7 @@ class ZemtikGovern:
         INSIDE this guard so a masking bug can't leak into governance either,
         the same protection as a hostile tracer (invariant 2a)."""
         span = _CURRENT_SPAN.get()
-        if span is None:
+        if span is None or span is _SPAN_OPEN_FAILED:
             return
         try:
             span.set(**attrs_fn())
@@ -482,18 +521,16 @@ class ZemtikGovern:
 
         Slice 2: the CALLER (``govern()``, or ``_GovernedProxy`` for the proxy
         path) opens the root ``"govern"`` span via ``_traced_root(ctx)`` before
-        calling this method — not this method itself — so a proxy() call can
-        keep the SAME root open across the subsequent output-screening span
-        too (a bare ``govern()`` call's root closes right after this method
-        returns, since it has no output to screen). This method's own
-        ``_span_set`` calls annotate whatever span the caller left current:
-        the fingerprint-failure, conflict, and replay paths all get traced
-        this way (they never call ``_evaluate_and_audit``, so they would
-        otherwise be silently untraced) while still guaranteeing a replayed
-        decision emits exactly ONE root observation with no identity/policy
-        children — by construction, since that branch never opens them.
+        calling this method — not this method itself — and ``_traced_root``
+        already annotates it with ``safe_trace_attrs_root`` on open, so this
+        method does not repeat that call. This method's own ``_span_set``
+        calls annotate whatever span the caller left current: the
+        fingerprint-failure, conflict, and replay paths all get traced this
+        way (they never call ``_evaluate_and_audit``, so they would otherwise
+        be silently untraced) while still guaranteeing a replayed decision
+        emits exactly ONE root observation with no identity/policy children —
+        by construction, since that branch never opens them.
         """
-        self._span_set(lambda: safe_trace_attrs_root(ctx, mode=self._mode))
         key = ctx.idempotency_key
         if key is None:
             did, decision = await self._evaluate_and_audit(ctx)
@@ -607,51 +644,82 @@ class ZemtikGovern:
         entry is stamped with the reserved unidentified DID. Returns
         ``(did, decision)`` with the decision enriched with its audit id; does NOT
         enforce (the caller decides whether a deny raises).
+
+        ``audit_event_id`` is set on the ``policy`` span (docs/observability.md's
+        documented shape), not the root: the audit write for a successful
+        evaluation happens while the ``policy`` span is still the current one, so
+        the two ``_span_set`` calls inside that ``with`` block land on the same
+        span. An identity/policy fault is annotated on whichever span was open
+        when it happened, via ``_deny_engine_error`` below.
         """
         did = _UNIDENTIFIED_DID
-        try:
-            # Two separate sibling spans, each a direct child of the root
-            # "govern" span via _CURRENT_SPAN. Lifecycle sits OUTSIDE
-            # _with_budget's race window (opens before the call, closes after
-            # it returns/raises) — the timer inside _with_budget is created
-            # fresh on each call and is blind to what ran before it, so span
-            # open/close latency structurally cannot trip DecisionBudgetExceeded.
-            with self._traced("identity"):
+        # Two separate sibling spans, each a direct child of the root "govern"
+        # span via _CURRENT_SPAN. Lifecycle sits OUTSIDE _with_budget's race
+        # window (opens before the call, closes after it returns/raises) — the
+        # timer inside _with_budget is created fresh on each call and is blind
+        # to what ran before it, so span open/close latency structurally
+        # cannot trip DecisionBudgetExceeded.
+        with self._traced("identity"):
+            try:
                 did = (await self._with_budget(self._identity.identify(ctx.subject))).did
-            with self._traced("policy"):
-                decision = await self._with_budget(self._select_engine().evaluate(ctx))
-                self._span_set(lambda: safe_trace_attrs_decision(decision))
-        except Exception as exc:
-            # Fail-closed: the tool never runs; the original exception is preserved.
-            denial = Decision(
-                allowed=False,
-                action="error",
-                matched_rule=None,
-                reason=f"engine error: {exc}",
-                denial_kind="system",
-            )
-            event_id = await self._audit.write(
-                AuditEntry.from_decision(ctx, did, denial, outcome="error", mode=self._mode)
-            )
-            # A budget breach already carries its own stable code/guard and the
-            # remedy message (D6/D8); attach the audit id and re-raise it unchanged
-            # so a caller can branch on ``code == "decision_budget_exceeded"`` and
-            # read ``limit_seconds``/``elapsed_seconds`` — wrapping it would erase
-            # all of that behind a generic engine-failed string.
-            if isinstance(exc, DecisionBudgetExceeded):
-                exc.audit_id = event_id
-                raise
-            raise GovernanceError(
-                "governance engine failed; tool blocked",
-                code="engine_error",
-                audit_id=event_id,
-            ) from exc
+            except Exception as exc:
+                await self._deny_engine_error(ctx, did, exc)
 
-        event_id = await self._audit.write(
-            AuditEntry.from_decision(ctx, did, decision, mode=self._mode)
-        )
-        self._span_set(lambda: {"audit_event_id": event_id})
+        with self._traced("policy"):
+            try:
+                decision = await self._with_budget(self._select_engine().evaluate(ctx))
+            except Exception as exc:
+                await self._deny_engine_error(ctx, did, exc)
+            self._span_set(lambda: safe_trace_attrs_decision(decision))
+
+            event_id = await self._audit.write(
+                AuditEntry.from_decision(ctx, did, decision, mode=self._mode)
+            )
+            self._span_set(lambda: {"audit_event_id": event_id})
+
         return did, replace(decision, audit_event_id=event_id)
+
+    async def _deny_engine_error(
+        self, ctx: GovernanceContext, did: str, exc: Exception
+    ) -> NoReturn:
+        """Fail-closed: the tool never runs; the original exception is preserved.
+
+        Called from inside whichever ``with self._traced(...)`` block (identity
+        or policy) was open when the fault happened, so the system-denial
+        ``_span_set`` call below lands on that same span — the same
+        denial_kind/event/audit_event_id shape the idempotency
+        fingerprint-error and conflict paths use. Always raises; never returns.
+        """
+        denial = Decision(
+            allowed=False,
+            action="error",
+            matched_rule=None,
+            reason=f"engine error: {exc}",
+            denial_kind="system",
+        )
+        event_id = await self._audit.write(
+            AuditEntry.from_decision(ctx, did, denial, outcome="error", mode=self._mode)
+        )
+        self._span_set(
+            lambda: {
+                "denial_kind": "system",
+                "event": "engine_error",
+                "audit_event_id": event_id,
+            }
+        )
+        # A budget breach already carries its own stable code/guard and the
+        # remedy message (D6/D8); attach the audit id and re-raise it unchanged
+        # so a caller can branch on ``code == "decision_budget_exceeded"`` and
+        # read ``limit_seconds``/``elapsed_seconds`` — wrapping it would erase
+        # all of that behind a generic engine-failed string.
+        if isinstance(exc, DecisionBudgetExceeded):
+            exc.audit_id = event_id
+            raise exc
+        raise GovernanceError(
+            "governance engine failed; tool blocked",
+            code="engine_error",
+            audit_id=event_id,
+        ) from exc
 
     def _ks_state(self) -> bool:
         """The killswitch's current engaged state as a plain bool — part of the

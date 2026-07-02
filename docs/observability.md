@@ -251,3 +251,63 @@ span annotation today, only the existing log line.
 See `tests/observability/test_core_tracing.py` for the masking / no-echo /
 injection-annotation assertions, and `tests/observability/_fakes.py` for the
 recording and hostile fake tracers the test suite drives.
+
+## Tracing an LLM agent (LangChain) — Slice 2b
+
+`zemtik_govern.langchain.langfuse_callback(boundary)` builds Langfuse's native
+LangChain `CallbackHandler`, bound to an already-constructed `LangfuseBoundary`.
+Add it to a run's `callbacks` alongside a `Tracer`-instrumented `ZemtikGovern`
+(built with a `LangfuseTracer` over the *same* boundary) and the model call and
+every governed tool call inside that run land under one shared trace:
+
+```python
+from zemtik_govern.observability._langfuse import LangfuseBoundary
+from zemtik_govern.observability.tracer import LangfuseTracer
+from zemtik_govern.langchain import langfuse_callback, govern_tool
+
+boundary = LangfuseBoundary(public_key=..., secret_key=..., host=...)
+gov = GovernanceRegistry.from_config(config, agt).register_tracer(
+    LangfuseTracer(boundary)
+).build()
+handler = langfuse_callback(boundary)
+
+governed_tool = govern_tool(my_tool, govern=gov)
+
+# Pass `handler` (and propagate the same `config`) through the whole run —
+# LangChain forwards `callbacks`/parent-run-id automatically to nested
+# `.invoke()` calls made with that config, which is what keeps the OTel
+# context (and therefore the trace id) shared:
+model.invoke(messages, config={"callbacks": [handler]})
+governed_tool.invoke(args, config={"callbacks": [handler]})
+```
+
+```
+agent-run
+├─ <model-name>  (langfuse.observation.type=generation, model + token usage)   ← LangChain callback
+└─ govern
+   ├─ identity
+   └─ policy   (allowed=…, denial_kind=…, audit_event_id=…)                    ← core Tracer seam
+```
+
+**Ownership boundary:** the core library never imports an LLM SDK or
+`langchain`/`langfuse.langchain` — `langfuse_callback` lives under the optional
+`langchain` extra, and the only module that imports `langfuse` anywhere is
+still `observability/_langfuse.py` (`LangfuseBoundary.langchain_callback_handler()`
+is the sanctioned lazy-import point; `langfuse_callback` just calls it,
+duck-typed, the same discipline `LangfuseTracer` already follows).
+
+**Fail-open.** If the boundary can't build a real callback handler — the SDK
+extras are missing, the client is misconfigured, construction raises for any
+reason — `langfuse_callback` degrades to an inert `BaseCallbackHandler`
+subclass (every hook a no-op) instead of raising. A broken observability
+integration never changes a governed tool call's decision or result.
+
+**Note on the `langchain` extra:** `langfuse.langchain.CallbackHandler`
+unconditionally does `import langchain` (not just `langchain_core`) to check
+the installed major version. The `langchain` extra therefore pins the full
+`langchain` package (`langchain>=1.0.0,<2.0.0`) alongside `langchain-core` and
+`langgraph`.
+
+See `tests/langchain/test_langfuse_callback.py` for the generation-span,
+shared-trace-id, and fail-open assertions (all `importorskip`-guarded for
+`langfuse` + `langchain`).

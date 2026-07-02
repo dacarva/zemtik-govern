@@ -15,6 +15,7 @@ instead of reusing ``_agt.py``'s exact-match ``assert_pins``.
 from __future__ import annotations
 
 import importlib.metadata as _metadata
+import os
 from typing import TYPE_CHECKING, Any
 
 from ..errors import GovernanceNotConfigured
@@ -93,6 +94,10 @@ class LangfuseBoundary:
         from opentelemetry.sdk.trace import TracerProvider
 
         self.version = installed
+        # Mirrors the Langfuse client's own public_key resolution (env
+        # fallback) so `langchain_callback_handler` can look this exact
+        # client back up via the SDK's public_key-keyed client registry.
+        self.public_key = public_key or os.environ.get("LANGFUSE_PUBLIC_KEY")
         self._tracer_provider = TracerProvider()
         self.client: Langfuse = Langfuse(
             public_key=public_key,
@@ -101,3 +106,17 @@ class LangfuseBoundary:
             tracer_provider=self._tracer_provider,
             mask=mask or _default_mask,
         )
+
+    def langchain_callback_handler(self) -> Any:
+        """Build Langfuse's native LangChain ``CallbackHandler``, bound to
+        this boundary's client via the SDK's public_key-keyed client
+        registry (``langfuse._client.get_client.get_client``).
+
+        The only place — besides this module's own top-level ``Langfuse``
+        import above — that ever imports ``langfuse``: mirrors the
+        single-import-boundary rule so ``zemtik_govern/langchain/`` (the
+        Slice 2b caller) never imports the SDK itself.
+        """
+        from langfuse.langchain import CallbackHandler
+
+        return CallbackHandler(public_key=self.public_key)

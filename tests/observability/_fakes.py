@@ -22,6 +22,12 @@ class RecordedSpan:
     attrs: dict[str, Any] = field(default_factory=dict)
     children: list[RecordedSpan] = field(default_factory=list)
     closed: bool = False
+    # The exc_type __exit__ was actually called with (None when the `with`
+    # block exited cleanly). Real Langfuse spans mark themselves ERROR from
+    # exactly this argument — a regression here silently mislabels every span
+    # closed on a healthy path as failed (see the govern_sync sys.exc_info()
+    # staleness bug this dataclass field exists to catch).
+    exit_exc_type: type[BaseException] | None = None
 
 
 class _RecordingSpanCM:
@@ -46,6 +52,7 @@ class _RecordingSpanCM:
 
     def __exit__(self, *exc: object) -> bool:
         self._recorded.closed = True
+        self._recorded.exit_exc_type = exc[0] if exc else None
         return False
 
 
@@ -104,6 +111,22 @@ class ExplodingExitTracer:
 
     def trace(self, name: str, **attrs: Any) -> _ExitBoomSpan:
         return _ExitBoomSpan()
+
+
+class RootOnceExplodingTracer:
+    """``.trace()`` (the root open) raises ``__enter__`` exactly once; every
+    later call opens a real recording span. Used to prove a nested ``_traced``
+    call whose PARENT failed to open stays untraced rather than opening a
+    disconnected new root (see core.py's ``_SPAN_OPEN_FAILED`` sentinel)."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def trace(self, name: str, **attrs: Any):
+        self.calls.append(name)
+        if len(self.calls) == 1:
+            return _EnterBoomSpan()
+        return _RecordingSpanCM(RecordedSpan(name=name, attrs=dict(attrs)))
 
 
 class SlowTracer:

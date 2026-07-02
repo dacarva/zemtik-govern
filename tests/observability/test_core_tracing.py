@@ -131,12 +131,14 @@ async def test_policy_span_carries_denial_kind_on_deny():
 
 
 @pytest.mark.asyncio
-async def test_root_span_annotated_with_the_real_audit_event_id():
+async def test_policy_span_annotated_with_the_real_audit_event_id():
     tracer = RecordingTracer()
     seams = _Seams(decision=_ALLOW)
     gov = ZemtikGovern(identity=seams, policy=seams, audit=seams, tracer=tracer)
     await gov.govern(_ctx())
-    assert tracer.roots[0].attrs["audit_event_id"] == "evt-1"
+    policy_span = tracer.roots[0].children[1]
+    assert policy_span.name == "policy"
+    assert policy_span.attrs["audit_event_id"] == "evt-1"
 
 
 @pytest.mark.asyncio
@@ -195,3 +197,26 @@ async def test_masking_no_raw_payload_substring_on_injection_hit_and_injection_a
     assert policy_span.attrs["injection"] is True
     assert policy_span.attrs["injection.type"] == "direct_override"
     assert policy_span.attrs["injection.threat"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_injection_annotation_survives_a_field_name_containing_an_apostrophe():
+    """injection.py builds the deny reason via `{field!r}`, and Python's repr
+    switches to double quotes when the field name itself contains an apostrophe
+    (and no double quote) — the injection-annotation regex must match either
+    delimiter, or the annotation silently disappears for exactly these field
+    names."""
+    tracer = RecordingTracer()
+    seams = _Seams(decision=_ALLOW)
+    classifier = _FakeInjectionClassifier(trigger_field="user's_note")
+    gov = ZemtikGovern(
+        identity=seams,
+        policy=GuardedEngine(seams, classifier),
+        audit=seams,
+        tracer=tracer,
+        mode="shadow",
+    )
+    await gov.govern(_ctx(payload={"user's_note": "irrelevant"}))
+    policy_span = tracer.roots[0].children[1]
+    assert policy_span.attrs["injection"] is True
+    assert policy_span.attrs["injection.field"] == "user's_note"

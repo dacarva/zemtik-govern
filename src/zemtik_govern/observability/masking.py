@@ -26,8 +26,14 @@ from ..protocols import Decision
 # re-parsing it for span attrs adds no new leak. Shadow-mode injection hits
 # never produce this Decision shape at all (see injection.py's shadow branch),
 # so they are simply left un-annotated here — documented in observability.md.
+#
+# injection.py builds the field name via Python's `!r` (repr), whose quoting
+# is value-dependent: a field name containing an apostrophe (and no double
+# quote) flips repr to double quotes. The backreference below matches either
+# delimiter, as long as both ends agree, so that case still parses instead of
+# silently dropping the injection annotation.
 _INJECTION_REASON_RE = re.compile(
-    r"^prompt injection detected in field '(?P<field>.*)' "
+    r"^prompt injection detected in field (?P<quote>['\"])(?P<field>.*)(?P=quote) "
     r"\(type=(?P<type>[^,]+), threat=(?P<threat>[^)]+)\)$"
 )
 

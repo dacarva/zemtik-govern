@@ -330,10 +330,10 @@ generated with `uv pip compile --generate-hashes`:
 |----------|-------|--------|-----------------|
 | `requirements.lock` | runtime only | installed + audited | `uv pip compile pyproject.toml --generate-hashes -o requirements.lock` |
 | `requirements-dev.lock` | runtime + dev tooling | local lean-dev convenience (not CI-installed) | `uv pip compile pyproject.toml --extra dev --generate-hashes -o requirements-dev.lock` |
-| `requirements-all.lock` | runtime + dev + `langchain`/`mcp`/`openai` extras | installed + audited | `uv pip compile pyproject.toml --extra dev --extra langchain --extra mcp --extra openai --generate-hashes -o requirements-all.lock` |
+| `requirements-all.lock` | runtime + dev + `langchain`/`mcp`/`openai`/`langfuse` extras | installed + audited | `uv pip compile pyproject.toml --extra dev --extra langchain --extra mcp --extra openai --extra langfuse --generate-hashes -o requirements-all.lock` |
 
 The CI `test` job installs from `requirements-all.lock` with `--require-hashes`,
-so the langchain/mcp/openai integration surface is as supply-chain-verified as
+so the langchain/mcp/openai/langfuse integration surface is as supply-chain-verified as
 the core. `requirements-dev.lock` is a lean local install (runtime + dev, no
 heavy integration extras) for contributors who don't need them; CI does not
 install or audit it because `requirements-all.lock` already covers the same dev

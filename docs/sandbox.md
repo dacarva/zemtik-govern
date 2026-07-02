@@ -19,6 +19,8 @@ uv pip install -e ".[dev]"
 | `dogfood_cutover.py` | Staged cutover of a fintech agent: shadow → enforce, kill-switch revert, audit integrity | none |
 | `e2e_openai_governed.py` | A real `gpt-5.4-nano` agent governed through `GovernedToolNode` against a mock bank DB, plus deterministic probes for every hardening module (injection battery, decision budget, per-guard shadow, idempotency, error codes, **output seam**) | `[langchain]`, `[openai]`, OpenAI key |
 | `langfuse_boundary_smoke.py` | `LangfuseBoundary` (Slice 1) talks to a real Langfuse backend: auth check, a flushed manual trace, and the `mask` hook running on a real emitted span. NOT a governance demo — no seam is traced yet. | `[langfuse]`, a Langfuse project's keys |
+| `langfuse_slice2_smoke.py` | Core façade instrumentation (Slice 2): three real `govern()` calls (allow, deny, replay) emit a masked, nested `govern`/`identity`/`policy` trace to a live Langfuse backend. | `[langfuse]`, a Langfuse project's keys |
+| `langfuse_langchain_smoke.py` | The Langfuse LangChain callback helper (Slice 2b, `langfuse_callback()`): a fake model call and a governed tool call share ONE root trace on a live Langfuse backend. | `[langchain,langfuse]`, a Langfuse project's keys |
 
 ## qa_demo.py — three-seam scenarios
 
@@ -165,9 +167,49 @@ error); `1` means the backend rejected the credentials or wasn't reachable;
 `0` means the trace was created, flushed, and its URL printed — check that URL
 in the Langfuse UI to see the masked value.
 
-Once Slice 2/2b land, `e2e_openai_governed.py` gets an opt-in Langfuse mode
-that traces the real governed agent run end to end (Slice 8) — this script is
-the narrower, Slice-1-scoped predecessor.
+## langfuse_slice2_smoke.py — core façade instrumentation smoke test
+
+Proves the core `Tracer` seam (`ZemtikGovern._traced`/`_span_set`, Slice 2)
+emits a real, nested, masked trace to a live Langfuse backend through actual
+`govern()` calls — not just the raw boundary above. Runs three calls through a
+real `AgentOsPolicy`/`StaticIdentity`/`AgentMeshAudit` pipeline with a real
+`LangfuseTracer`:
+
+1. **allow** — root `govern` span with `identity`/`policy` children, `policy.attrs.allowed=True`.
+2. **deny** — same shape, `policy.attrs.denial_kind="policy"` (deny-by-default).
+3. **replay** — same `idempotency_key`+payload as (1); root span annotated
+   `replayed=true` with NO `identity`/`policy` children (that path never
+   re-runs governance).
+
+Each call's payload carries a sentinel raw value that must never appear in any
+span attribute (no-echo masking) — check the Langfuse UI traces after running.
+
+```bash
+uv pip install -e ".[dev,langfuse]"
+cp .env.example .env   # set LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST
+python sandbox/langfuse_slice2_smoke.py
+```
+
+## langfuse_langchain_smoke.py — Langfuse LangChain callback smoke test
+
+Proves `zemtik_govern.langchain.langfuse_callback()` (Slice 2b, issue #59)
+wires Langfuse's native LangChain `CallbackHandler` so an LLM generation and a
+governed tool call's governance spans land under **one shared trace** on a
+live backend. Uses a fake/stub LangChain chat model (`FakeMessagesListChatModel`)
+so no OpenAI key is needed — only the trace-sharing wiring is under test, not
+a real model call.
+
+```bash
+uv pip install -e ".[dev,langchain,langfuse]"
+cp .env.example .env   # set LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST
+python sandbox/langfuse_langchain_smoke.py
+```
+
+Check the Langfuse UI: one trace should contain both a `zemtik-slice2b-smoke-model`
+generation observation (with token usage) and a `govern` span with
+`identity`/`policy` children — same trace id. `e2e_openai_governed.py` itself
+does not yet have an opt-in Langfuse mode; that lands in Slice 8, which will
+reuse this helper against the real live agent run.
 
 ## S16 — Output-seam PII redaction (qa_demo.py)
 
